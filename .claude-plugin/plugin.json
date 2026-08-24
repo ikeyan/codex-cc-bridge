@@ -1,0 +1,8 @@
+{
+  "name": "codex-cc-bridge",
+  "version": "0.1.0",
+  "description": "Thin bridge to OpenAI Codex via a resident app-server, contained inside the Claude Code sandbox.",
+  "author": {
+    "name": "ikeyan"
+  }
+}
