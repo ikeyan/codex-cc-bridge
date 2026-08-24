@@ -19,6 +19,7 @@ const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 // Minimal RFC6455 text-frame server good enough for JSON-RPC lines in tests.
 function startMockServer(onMessage) {
   const sockets = new Set();
+  const authHeaders = [];
   const server = net.createServer((socket) => {
     sockets.add(socket);
     let handshaken = false;
@@ -44,6 +45,7 @@ function startMockServer(onMessage) {
         const head = buf.slice(0, end).toString("utf8");
         buf = buf.slice(end + 4);
         const key = /Sec-WebSocket-Key: (.+)/i.exec(head)?.[1]?.trim();
+        authHeaders.push(/^Authorization: (.+)$/im.exec(head)?.[1]?.trim() ?? null);
         const accept = crypto.createHash("sha1").update(key + WS_GUID).digest("base64");
         socket.write(
           "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
@@ -84,6 +86,7 @@ function startMockServer(onMessage) {
     server.listen(0, "127.0.0.1", () => {
       resolve({
         port: server.address().port,
+        authHeaders,
         close: () => {
           for (const s of sockets) s.destroy();
           server.close();
@@ -415,6 +418,27 @@ test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
   assert.equal(r.code, 130, r.stderr);
   const interrupt = findRequest(recorded, "turn/interrupt");
   assert.deepEqual(interrupt.params, { threadId: "thread-1", turnId: "turn-1" });
+});
+
+test("--token-file attaches Authorization: Bearer to the handshake", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "codex-turn-test-"));
+  const tokenPath = join(dir, "token");
+  writeFileSync(tokenPath, "sekrit-token-123\n", { mode: 0o600 });
+
+  const recorded = [];
+  const server = await startMockServer(appServerBehaviour(recorded));
+  const withToken = await runDriver(["--cwd", "/tmp", "--token-file", tokenPath], {
+    port: server.port,
+    stdin: "x",
+  });
+  const withoutToken = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(withToken.code, 0, withToken.stderr);
+  assert.equal(withoutToken.code, 0, withoutToken.stderr);
+  assert.deepEqual(server.authHeaders, ["Bearer sekrit-token-123", null]);
 });
 
 test("server->client requests get schema-valid denials (fail closed)", async () => {

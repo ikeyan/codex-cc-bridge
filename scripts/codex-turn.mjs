@@ -38,14 +38,15 @@ const FLAGS_WITH_VALUE = new Set([
   "--url",
   "--prompt",
   "--review-target",
+  "--token-file",
 ]);
 
 function usage(message) {
   if (message) console.error(`codex-turn: ${message}`);
   console.error(
     "usage: codex-turn.mjs [--cwd DIR] [--thread ID] [--schema FILE] [--model M] [--effort E]\n" +
-      "                      [--port N | --url ws://127.0.0.1:N] [--prompt TEXT | prompt on stdin]\n" +
-      "                      [--review-target JSON]\n" +
+      "                      [--port N | --url ws://127.0.0.1:N] [--token-file FILE]\n" +
+      "                      [--prompt TEXT | prompt on stdin] [--review-target JSON]\n" +
       "The app-server must already be running inside the Claude sandbox:\n" +
       "  codex app-server --listen ws://127.0.0.1:PORT   (run_in_background Bash)",
   );
@@ -81,12 +82,16 @@ let prompt = opts.prompt;
 if (!reviewTarget && prompt === undefined) prompt = fs.readFileSync(0, "utf8");
 if (!reviewTarget && !prompt.trim()) usage("empty prompt");
 const outputSchema = opts.schema ? JSON.parse(fs.readFileSync(opts.schema, "utf8")) : undefined;
+// Capability token for a server started with --ws-auth capability-token.
+// Works on loopback (measured); connections without it are rejected at handshake.
+const tokenFile = opts["token-file"] ?? process.env.CODEX_BRIDGE_TOKEN_FILE;
+const token = tokenFile ? fs.readFileSync(tokenFile, "utf8").trim() : null;
 
 const progress = (event, detail) => {
   console.error(JSON.stringify({ event, ...detail }));
 };
 
-const ws = new WebSocket(url);
+const ws = new WebSocket(url, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
 let nextId = 1;
 const pending = new Map();
 let threadId = opts.thread;
@@ -116,8 +121,11 @@ function fail(message, code = 1) {
 
 ws.onerror = () => {
   fail(
-    `cannot reach app-server at ${url}. Start it inside the Claude sandbox first:\n` +
-      `  codex app-server --listen ${url}   (run_in_background Bash; check http://127.0.0.1:${port}/readyz)`,
+    `cannot reach app-server at ${url} (not running, or it rejected the handshake).\n` +
+      `- If http://127.0.0.1:${port}/readyz succeeds, the server is up but requires a capability token:\n` +
+      `  pass the matching --token-file (or it belongs to another session; use a different port).\n` +
+      `- Otherwise start it inside the Claude sandbox first (run_in_background Bash):\n` +
+      `  codex app-server --listen ${url} --ws-auth capability-token --ws-token-file <token-file>`,
   );
 };
 ws.onclose = () => {

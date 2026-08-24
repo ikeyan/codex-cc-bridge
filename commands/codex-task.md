@@ -25,10 +25,12 @@ Steps:
    and quotes inside the material bundle:
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs" --cwd "$PWD" [--thread <id>] [--model <m>] [--schema <file>] <<'CODEX_PROMPT'
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs" --cwd "$PWD" --token-file <TOKEN_FILE> [--thread <id>] [--model <m>] [--schema <file>] <<'CODEX_PROMPT'
    <prompt including materials, pasted verbatim>
    CODEX_PROMPT
    ```
+
+   (`<TOKEN_FILE>` is the capability-token file from the skill's launch recipe.)
 
 4. **Report**: when the task completes, relay `finalMessage` to the user, and mention the
    `threadId` so the conversation can be continued with `--thread`.

@@ -32,10 +32,12 @@ Steps:
    shas, or instructions never get shell-expanded:
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs" --cwd "$PWD" --review-target - <<'CODEX_TARGET'
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs" --cwd "$PWD" --token-file <TOKEN_FILE> --review-target - <<'CODEX_TARGET'
    <target-json>
    CODEX_TARGET
    ```
+
+   (`<TOKEN_FILE>` is the capability-token file from the skill's launch recipe.)
 
 5. **Report**: relay `finalMessage` (the review findings) to the user unchanged, plus the
    `threadId` for follow-up questions via `/codex-task --thread <id>`.

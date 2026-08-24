@@ -131,12 +131,14 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
 - **egress は防げない**: Codex に渡したプロンプト・材料 (diff/ファイル/トランスクリプト) は OpenAI に
   送信される。サンドボックスは egress を止めない。working-tree レビューは未ステージの WIP も送りうる。
   → 送信前に Claude が範囲を提示し、必要なら redact する運用を仕様に含める。
-- **残余リスク (実装済みの緩和と限界)**: turn ドライバは接続時に封じ込めプローブ (`command/exec` で
-  $HOME 書込不可 & 対象 cwd 書込可) を行い、sandbox 外の app-server と別リポジトリのセッションの
-  app-server への誤接続を fail-closed で拒否する。ただし loopback ws に認証は無いため、
-  (a) **同一 checkout を並行する別 CC セッションの server** はプローブで区別できない
-  (運用: セッションごとに `CODEX_BRIDGE_PORT` を分ける)、(b) 同一マシンの任意ローカルプロセスが
-  常駐 server に接続できる (副作用はその server の Claude sandbox 内に閉じる)。
+- **残余リスク (実装済みの緩和と限界)**: 二層の防御を実装済み。
+  (1) app-server は **capability token 認証** (`--ws-auth capability-token`、loopback でも機能することを
+  実測) つきで起動し、セッションごとに生成した token を知らないプロセスは handshake で拒否される。
+  これにより別セッション・他ツールの誤接続とポートスキャン経由の接続は塞がる。
+  (2) turn ドライバは接続後に封じ込めプローブ (`command/exec` で $HOME 書込不可 & 対象 cwd 書込可) を
+  行い、sandbox 外で起動された server への誤接続を fail-closed で拒否する。
+  限界: 同一ユーザーで能動的に動く攻撃者 (token ファイルや `~/.codex` の資格情報を読める) は
+  どの方式でも防げない — これは OS のユーザー境界の問題で、本設計のスコープ外。
 
 ## 検証 (done の条件)
 

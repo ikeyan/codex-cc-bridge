@@ -11,8 +11,9 @@ Codex を Claude Code から使うための薄い橋。1 セッション 1 常�
 
 ## セキュリティ不変条件 (絶対に守る)
 
-1. app-server は **Claude sandbox 内** (通常の Bash / run_in_background) で起動する。
-   driver は turn 前に封じ込めプローブ (`command/exec` で $HOME 書込不可 & 対象 cwd 書込可) を
+1. app-server は **Claude sandbox 内** (通常の Bash / run_in_background) で、**capability token
+   認証つき**で起動する (起動レシピ参照)。token を知らないローカルプロセスは接続できない。
+   driver はさらに turn 前に封じ込めプローブ (`command/exec` で $HOME 書込不可 & 対象 cwd 書込可) を
    自動実行し、sandbox 外の server や別セッションの server には fail-closed で接続を拒否する。
 2. thread/turn の sandbox は driver が `danger-full-access` に固定している (変更不可)。
    これで Codex のコマンド実行は Claude sandbox の部分集合に閉じる
@@ -32,21 +33,24 @@ Codex を Claude Code から使うための薄い橋。1 セッション 1 常�
 ## 起動レシピ (セッションで最初に 1 回)
 
 ポートは `PORT="${CODEX_BRIDGE_PORT:-41100}"`。driver も同じ既定を使うので、変更するときは
-env `CODEX_BRIDGE_PORT` で両方を一括で切り替える (レシピと driver でポートがずれると
-readyz は通るのに turn が繋がらない、が起きる)。
+env `CODEX_BRIDGE_PORT` で両方を一括で切り替える。server は **capability token 認証つき**で
+立てる (token 無しの接続は handshake で拒否される。loopback でも機能することを実測済み)。
 
-1. 健全性チェック: `curl -fsS "http://127.0.0.1:${CODEX_BRIDGE_PORT:-41100}/readyz"` が成功したら起動済み。
-2. 失敗したら run_in_background の Bash で常駐させる:
-   `codex app-server --listen "ws://127.0.0.1:${CODEX_BRIDGE_PORT:-41100}"`
+1. token 生成 (0600 の一時ファイル。**パスをこのセッション中ずっと使うので覚えておく**):
+   `TOKEN_FILE=$(mktemp "$TMPDIR/codex-bridge-token.XXXXXX") && node -e 'require("fs").writeFileSync(process.argv[1], require("crypto").randomBytes(32).toString("hex"))' "$TOKEN_FILE" && echo "$TOKEN_FILE"`
+2. run_in_background の Bash で常駐させる (`<TOKEN_FILE>` は 1 のパス):
+   `codex app-server --listen "ws://127.0.0.1:${CODEX_BRIDGE_PORT:-41100}" --ws-auth capability-token --ws-token-file <TOKEN_FILE>`
    (localhost bind のみ。unix socket / `app-server daemon` / `proxy` は sandbox 内で bind
    できないため使えない。)
-3. 数秒後に readyz を再確認してから turn を投げる。
-4. app-server はセッション終了で死ぬ。次のセッションでも同じレシピで再起動する。
-5. **同じリポジトリを複数の CC セッションで並行させる場合**は、セッションごとに別の
-   `CODEX_BRIDGE_PORT` を使う。driver の封じ込めプローブは「sandbox 外の server」と
-   「別リポジトリのセッションの server」は拒否できるが、同一 checkout の別セッションの
-   server は区別できない (残余リスク: そのセッションの sandbox 設定が異なると
-   「⊆ *自* セッション sandbox」が厳密には保証されない。loopback ws に認証は無い)。
+3. 数秒後に `curl -fsS "http://127.0.0.1:${CODEX_BRIDGE_PORT:-41100}/readyz"` を確認してから turn を投げる。
+   turn には必ず `--token-file <TOKEN_FILE>` を付ける。
+4. readyz は成功するのに turn が「rejected the handshake」で落ちる場合、そのポートは
+   **別セッションの server**。ポートを変えて 1 からやり直す (token が異なるため誤使用は起きない)。
+5. app-server はセッション終了で死ぬ。次のセッションでも同じレシピで再起動する。
+6. 追加の堅牢化 (任意): server 起動と readyz 確認の後に token ファイルを削除してもよい
+   (server はメモリ保持)。その場合 token は会話コンテキストにのみ残るので、以後の driver には
+   token を一時ファイルに書き直して渡し、使用後に消す。既定はファイル保持で十分
+   (同一ユーザーの能動的な攻撃者には ~/.codex の資格情報ごと露出しており、これはどの方式でも防げない)。
 
 ## 1 ターンの駆動
 
@@ -55,10 +59,12 @@ prompt は stdin から渡す (材料束の入口)。**必ず quoted heredoc** �
 turn は原則 run_in_background の Bash で:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs" --cwd "$PWD" <<'CODEX_PROMPT'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs" --cwd "$PWD" --token-file <TOKEN_FILE> <<'CODEX_PROMPT'
 <prompt including materials, verbatim>
 CODEX_PROMPT
 ```
+
+(`--token-file` の代わりに env `CODEX_BRIDGE_TOKEN_FILE` でも渡せる。)
 
 - 結果: stdout に JSON `{ threadId, turnStatus, turnError, finalMessage, tokenUsage }`。
 - 進捗: stderr に 1 行 1 イベント (コマンド実行・エージェントメッセージ)。Monitor で追える。
