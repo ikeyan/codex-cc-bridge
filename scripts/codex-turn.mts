@@ -239,7 +239,7 @@ function request<T>(method: string, params: unknown): Promise<T> {
 }
 /** request() with a deadline — for control-plane calls that must answer promptly. */
 function controlRequest<T>(method: string, params: unknown, timeoutMs = CONTROL_TIMEOUT_MS): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     request<T>(method, params),
     new Promise<never>((_, rej) => {
@@ -491,7 +491,7 @@ turnIdentified();
 const completed = await turnDone;
 settled = true;
 const turn: Turn = completed.turn ?? {};
-let finalMessage = finalAnswer ?? lastAgentMessage;
+let finalMessage: string | null = finalAnswer ?? lastAgentMessage;
 if (finalMessage === null) {
   const items = (turn.items ?? []).filter((i) => i.type === "agentMessage");
   const final = items.find((i) => i.phase === "final_answer") ?? items[items.length - 1];

@@ -9,6 +9,9 @@
 - スクリプトは node 組み込みを優先 (引数解析は `node:util` の `parseArgs`)、型付き .mts
   (erasable types のみ、Node >= 23.6 の type stripping で直接実行) で書く。依存ゼロを維持。
 - テスト: `node --test tests/codex-turn.test.mjs`
+- 型チェック: `deno check scripts/codex-turn.mts` (インストール不要で最速。tsc なら strict +
+  `erasableSyntaxOnly` + `@types/node` で通ること)。runtime 非依存に書く —
+  `NodeJS.Timeout` でなく `ReturnType<typeof setTimeout>` (bun/deno でも動作確認済み)。
 - 実行済みの設計メモは git 履歴に委ねて整理する。
 - コミット末尾に Co-Authored-By と Claude-Session の trailer を付ける
   (セッション URL はセッションごとに違うので使い回さない)。
