@@ -1,20 +1,28 @@
 // Pins the security invariants of scripts/codex-turn.mts against a mock app-server:
+//   - the endpoint must be loopback and a capability token is required
 //   - a containment probe (command/exec) runs BEFORE any thread is started;
-//     HOME writable or cwd non-writable aborts the run
+//     $HOME or /tmp writable, or cwd non-writable, aborts the run
 //   - thread/start & thread/resume always carry sandbox "danger-full-access" + approvalPolicy "never"
 //   - turn/start always carries sandboxPolicy {type:"dangerFullAccess"} + approvalPolicy "never"
 //   - unknown flags are rejected before any connection is made
 //   - server->client requests are denied with schema-valid shapes
-//   - events from unrelated threads/turns are ignored
+//   - events from unrelated threads/turns are ignored; control-plane RPCs are bounded
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const DRIVER = fileURLToPath(new URL("../scripts/codex-turn.mts", import.meta.url));
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+// A token file shared by all tests (the driver refuses to run without one).
+const TOKEN_PATH = join(mkdtempSync(join(tmpdir(), "codex-turn-test-")), "token");
+writeFileSync(TOKEN_PATH, "sekrit-token-123\n", { mode: 0o600 });
 
 // Minimal RFC6455 text-frame server good enough for JSON-RPC lines in tests.
 function startMockServer(onMessage) {
@@ -98,7 +106,10 @@ function startMockServer(onMessage) {
 
 // Standard mock behaviour: answer initialize/probe/thread/turn, record requests,
 // then complete the turn with one agentMessage.
-function appServerBehaviour(recorded, { probeStdout = "BLOCKED WRITABLE", onTurnStart, beforeInit } = {}) {
+function appServerBehaviour(
+  recorded,
+  { probeStdout = "BLOCKED BLOCKED WRITABLE", onTurnStart, beforeInit, turnStartResult } = {},
+) {
   return (msg, send) => {
     if (msg.method) recorded.push(msg);
     if (msg.id === undefined) return; // notifications
@@ -113,8 +124,9 @@ function appServerBehaviour(recorded, { probeStdout = "BLOCKED WRITABLE", onTurn
       send({
         jsonrpc: "2.0",
         id: msg.id,
-        result: { reviewThreadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } },
+        result: turnStartResult ?? { reviewThreadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } },
       });
+      if (turnStartResult) return;
       if (onTurnStart) {
         onTurnStart(send);
         return;
@@ -122,7 +134,7 @@ function appServerBehaviour(recorded, { probeStdout = "BLOCKED WRITABLE", onTurn
       send({
         jsonrpc: "2.0",
         method: "item/completed",
-        params: { threadId: "thread-1", item: { type: "agentMessage", text: "MOCK_DONE", phase: "final_answer" } },
+        params: { threadId: "thread-1", turnId: "turn-1", item: { type: "agentMessage", text: "MOCK_DONE", phase: "final_answer" } },
       });
       send({
         jsonrpc: "2.0",
@@ -135,10 +147,11 @@ function appServerBehaviour(recorded, { probeStdout = "BLOCKED WRITABLE", onTurn
   };
 }
 
-function runDriver(args, { port, stdin } = {}) {
+function runDriver(args, { port, stdin, env, noToken } = {}) {
+  const fullArgs = noToken || args.includes("--token-file") ? args : ["--token-file", TOKEN_PATH, ...args];
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [DRIVER, ...args], {
-      env: { ...process.env, ...(port ? { CODEX_BRIDGE_PORT: String(port) } : {}) },
+    const child = spawn(process.execPath, [DRIVER, ...fullArgs], {
+      env: { ...process.env, ...(port ? { CODEX_BRIDGE_PORT: String(port) } : {}), ...env },
     });
     let stdout = "";
     let stderr = "";
@@ -188,25 +201,28 @@ test("containment probe runs before thread/start and uses command/exec", async (
   const probe = findRequest(recorded, "command/exec");
   assert.equal(probe.params.cwd, "/tmp");
   assert.match(probe.params.command.join(" "), /touch "\$HOME\//);
+  assert.match(probe.params.command.join(" "), /touch "\/tmp\//);
   // The probe must not trip codex's own Seatbelt (nested sandbox dies in the
   // Claude sandbox); it must run in the server's inherited context.
   assert.deepEqual(probe.params.sandboxPolicy, { type: "dangerFullAccess" });
 });
 
-test("containment: HOME writable => refuse before any thread exists", async () => {
-  const recorded = [];
-  const server = await startMockServer(appServerBehaviour(recorded, { probeStdout: "WRITABLE WRITABLE" }));
-  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "hi" });
-  server.close();
-  assert.notEqual(r.code, 0);
-  assert.match(r.stderr, /NOT confined/);
-  assert.equal(findRequest(recorded, "thread/start"), undefined);
-  assert.equal(findRequest(recorded, "turn/start"), undefined);
+test("containment: HOME or /tmp writable => refuse before any thread exists", async () => {
+  for (const probeStdout of ["WRITABLE BLOCKED WRITABLE", "BLOCKED WRITABLE WRITABLE"]) {
+    const recorded = [];
+    const server = await startMockServer(appServerBehaviour(recorded, { probeStdout }));
+    const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "hi" });
+    server.close();
+    assert.notEqual(r.code, 0);
+    assert.match(r.stderr, /NOT confined/);
+    assert.equal(findRequest(recorded, "thread/start"), undefined, probeStdout);
+    assert.equal(findRequest(recorded, "turn/start"), undefined, probeStdout);
+  }
 });
 
 test("containment: cwd not writable => refuse (wrong session's server)", async () => {
   const recorded = [];
-  const server = await startMockServer(appServerBehaviour(recorded, { probeStdout: "BLOCKED BLOCKED" }));
+  const server = await startMockServer(appServerBehaviour(recorded, { probeStdout: "BLOCKED BLOCKED BLOCKED" }));
   const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "hi" });
   server.close();
   assert.notEqual(r.code, 0);
@@ -263,6 +279,27 @@ test("unknown flags are rejected before connecting (no sandbox injection path)",
   assert.equal(connected, false);
 });
 
+test("missing capability token is rejected before connecting", async () => {
+  let connected = false;
+  const server = await startMockServer(() => {
+    connected = true;
+  });
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x", noToken: true });
+  server.close();
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /token is required/);
+  assert.equal(connected, false);
+});
+
+test("non-loopback endpoints are rejected before connecting", async () => {
+  const r = await runDriver(["--cwd", "/tmp", "--url", "ws://192.168.1.10:41100"], { stdin: "x" });
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /non-loopback/);
+  const r2 = await runDriver(["--cwd", "/tmp", "--url", "wss://example.com/"], { stdin: "x" });
+  assert.equal(r2.code, 2);
+  assert.match(r2.stderr, /non-loopback/);
+});
+
 test("review tuning flags that cannot be applied are rejected", async () => {
   let connected = false;
   const server = await startMockServer(() => {
@@ -287,11 +324,17 @@ test("events from unrelated threads and turns are ignored", async () => {
   const server = await startMockServer(
     appServerBehaviour(recorded, {
       onTurnStart: (send) => {
-        // Noise from another thread and another turn on the same thread.
+        // Noise: another thread, another turn on the same thread, an item from
+        // another turn on the same thread.
         send({
           jsonrpc: "2.0",
           method: "item/completed",
           params: { threadId: "other-thread", item: { type: "agentMessage", text: "WRONG", phase: "final_answer" } },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "item/completed",
+          params: { threadId: "thread-1", turnId: "other-turn", item: { type: "agentMessage", text: "WRONG2", phase: "final_answer" } },
         });
         send({
           jsonrpc: "2.0",
@@ -307,7 +350,7 @@ test("events from unrelated threads and turns are ignored", async () => {
         send({
           jsonrpc: "2.0",
           method: "item/completed",
-          params: { threadId: "thread-1", item: { type: "agentMessage", text: "RIGHT", phase: "final_answer" } },
+          params: { threadId: "thread-1", turnId: "turn-1", item: { type: "agentMessage", text: "RIGHT", phase: "final_answer" } },
         });
         send({
           jsonrpc: "2.0",
@@ -349,7 +392,6 @@ test("completions arriving before our turn is identified are ignored", async () 
   assert.equal(r.code, 0, r.stderr);
   const out = JSON.parse(r.stdout);
   assert.equal(out.finalMessage, "MOCK_DONE");
-  // The real turn must still have been started and completed.
   assert.ok(findRequest(recorded, "turn/start"));
 });
 
@@ -375,7 +417,7 @@ test("latest agent message wins when no final_answer phase is present", async ()
           send({
             jsonrpc: "2.0",
             method: "item/completed",
-            params: { threadId: "thread-1", item: { type: "agentMessage", text } },
+            params: { threadId: "thread-1", turnId: "turn-1", item: { type: "agentMessage", text } },
           });
         }
         send({
@@ -404,7 +446,7 @@ test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
     }),
   );
   const result = new Promise((resolve) => {
-    child = spawn(process.execPath, [DRIVER, "--cwd", "/tmp"], {
+    child = spawn(process.execPath, [DRIVER, "--token-file", TOKEN_PATH, "--cwd", "/tmp"], {
       env: { ...process.env, CODEX_BRIDGE_PORT: String(server.port) },
     });
     let stderr = "";
@@ -420,25 +462,72 @@ test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
   assert.deepEqual(interrupt.params, { threadId: "thread-1", turnId: "turn-1" });
 });
 
-test("--token-file attaches Authorization: Bearer to the handshake", async () => {
-  const { mkdtempSync, writeFileSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const { join } = await import("node:path");
-  const dir = mkdtempSync(join(tmpdir(), "codex-turn-test-"));
-  const tokenPath = join(dir, "token");
-  writeFileSync(tokenPath, "sekrit-token-123\n", { mode: 0o600 });
-
+test("SIGTERM racing the turn/start response still interrupts the turn", async () => {
   const recorded = [];
-  const server = await startMockServer(appServerBehaviour(recorded));
-  const withToken = await runDriver(["--cwd", "/tmp", "--token-file", tokenPath], {
+  let child;
+  const server = await startMockServer((msg, send) => {
+    if (msg.method) recorded.push(msg);
+    if (msg.id === undefined) return;
+    if (msg.method === "initialize") send({ jsonrpc: "2.0", id: msg.id, result: {} });
+    else if (msg.method === "command/exec")
+      send({ jsonrpc: "2.0", id: msg.id, result: { exitCode: 0, stdout: "BLOCKED BLOCKED WRITABLE\n", stderr: "" } });
+    else if (msg.method === "thread/start") send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
+    else if (msg.method === "turn/start") {
+      // The server accepted the turn but the response is slow: kill the driver
+      // first, answer afterwards.
+      setTimeout(() => child.kill("SIGTERM"), 50);
+      setTimeout(() => send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "turn-1" } } }), 400);
+    } else {
+      send({ jsonrpc: "2.0", id: msg.id, result: {} });
+    }
+  });
+  const result = new Promise((resolve) => {
+    child = spawn(process.execPath, [DRIVER, "--token-file", TOKEN_PATH, "--cwd", "/tmp"], {
+      env: { ...process.env, CODEX_BRIDGE_PORT: String(server.port) },
+    });
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.write("long task");
+    child.stdin.end();
+  });
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
+  const interrupt = findRequest(recorded, "turn/interrupt");
+  assert.deepEqual(interrupt.params, { threadId: "thread-1", turnId: "turn-1" });
+});
+
+test("a start response without a turn id fails instead of hanging", async () => {
+  const recorded = [];
+  const server = await startMockServer(appServerBehaviour(recorded, { turnStartResult: { turn: {} } }));
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /no turn id/);
+});
+
+test("stalled control-plane RPCs time out instead of hanging", async () => {
+  const server = await startMockServer(() => {
+    // Handshake completes but nothing is ever answered.
+  });
+  const r = await runDriver(["--cwd", "/tmp"], {
     port: server.port,
     stdin: "x",
+    env: { CODEX_BRIDGE_CONTROL_TIMEOUT_MS: "500" },
   });
-  const withoutToken = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
   server.close();
-  assert.equal(withToken.code, 0, withToken.stderr);
-  assert.equal(withoutToken.code, 0, withoutToken.stderr);
-  assert.deepEqual(server.authHeaders, ["Bearer sekrit-token-123", null]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /no response after/);
+});
+
+test("--token-file attaches Authorization: Bearer to the handshake", async () => {
+  const recorded = [];
+  const server = await startMockServer(appServerBehaviour(recorded));
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(server.authHeaders, ["Bearer sekrit-token-123"]);
 });
 
 test("server->client requests get schema-valid denials (fail closed)", async () => {
@@ -462,7 +551,7 @@ test("server->client requests get schema-valid denials (fail closed)", async () 
     if (msg.method === "initialize") {
       send({ jsonrpc: "2.0", id: msg.id, result: {} });
     } else if (msg.method === "command/exec") {
-      send({ jsonrpc: "2.0", id: msg.id, result: { exitCode: 0, stdout: "BLOCKED WRITABLE\n", stderr: "" } });
+      send({ jsonrpc: "2.0", id: msg.id, result: { exitCode: 0, stdout: "BLOCKED BLOCKED WRITABLE\n", stderr: "" } });
     } else if (msg.method === "thread/start") {
       send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
     } else if (msg.method === "turn/start") {

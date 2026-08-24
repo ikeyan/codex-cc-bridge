@@ -6,14 +6,15 @@
 ## spike の決着 (spec「未解決事項」への回答)
 
 1. **常駐 app-server の寿命と封じ込め**: `run_in_background` の Bash で
-   `codex app-server --listen ws://127.0.0.1:PORT` を Claude sandbox 内に起動する。
+   `codex app-server --listen ws://127.0.0.1:PORT --ws-auth capability-token --ws-token-file <f>`
+   を Claude sandbox 内に起動する (token 認証は後続の全体レビューで追加。起動レシピは skill が正)。
    - unix socket は sandbox 内で bind 全滅 (EPERM)。**`app-server daemon` / `proxy` も同理由で不可** (棄却)。
    - loopback TCP は listen/connect とも可。`/readyz` `/healthz` で別プロセスから健全性チェック可。
    - セッション内は生存。セッションを跨ぐ常駐は不可 → **「セッション開始時に readyz 確認 →
      無ければ background Bash で起動」を skill の起動レシピとして固定**。
    - 封じ込め実測: danger thread のコマンドは `$HOME` 直下 BLOCKED / `$TMPDIR` OK / repo OK。
 2. **turn の駆動方式**: **自前の極小 WebSocket JSON-RPC クライアント** (node 組み込み `WebSocket`、
-   依存ゼロ、~150 行)。proxy 案は 1 で棄却済み。
+   依存ゼロ)。proxy 案は 1 で棄却済み。
 3. **出力スキーマ**: `turn/start` に `outputSchema` がネイティブに存在し機能する (実測)。
 4. **並行の上限**: 1 app-server 上で複数接続 × 複数 thread の同時 turn が成立 (実測)。
    律速は **CC 側の fan-out (並行サブエージェント数)** に寄せ、driver 側に制限は持たない。

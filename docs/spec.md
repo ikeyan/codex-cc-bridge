@@ -34,6 +34,9 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
 
 ### Claude Code 側の必要設定 (`~/.claude/settings.json`)
 
+- `sandbox.enabled`: `true` と `sandbox.failIfUnavailable`: `true` — sandbox が有効であることが
+  本設計全体の前提 (無効だと「⊆ Claude sandbox」が最初から成り立たない)。
+- `sandbox.network.allowLocalBinding`: `true` — 常駐 app-server の localhost listen 用 (macOS)。
 - `sandbox.filesystem.allowWrite`: `["~/.codex"]` — app-server の state 用。
 - `sandbox.network.allowedDomains`: `["api.openai.com","auth.openai.com","chatgpt.com","*.chatgpt.com"]`
   — 到達を実測済み。モデル一覧 refresh 用の副次ホスト 1 件が allowlist 外で非致命 ERROR になるが動作に影響なし。
@@ -50,8 +53,10 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
 
 ### 1. app-server を warm な常駐ランタイムとして使う
 
-- **1 セッション 1 app-server**。Claude sandbox 内で起動した長寿命プロセス (`codex app-server`,
-  必要なら codex 純正の `app-server daemon`/`proxy` を利用) を JSON-RPC で駆動する。
+- **1 セッション 1 app-server**。Claude sandbox 内で起動した長寿命プロセス
+  (`codex app-server --listen ws://127.0.0.1:PORT` + capability token 認証) を JSON-RPC で駆動する。
+  unix socket 系 (`app-server daemon`/`proxy` 含む) は sandbox 内で bind 不可のため使わない
+  (経緯は「未解決事項」1/2)。
 - 常駐させる理由 = ユーザー要件。得られるもの: (a) ターンごとのコールドスタート回避、
   (b) thread の永続と `resume`/`fork` がネイティブ、(c) 複数 thread の並行。
 - **必ず Claude sandbox 内で起動する**。子プロセス (codex がモデル指示で実行するコマンド) は
@@ -115,8 +120,8 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
 - **skill**: プロンプト集 + 起動レシピ (sandbox-off、材料束の組み方、app-server の起動/健全性)。
 - **slash command** `/codex-review`, `/codex-task`: `run_in_background` で 1 ターンを app-server に対して駆動。
   結果は CC 通知 + 出力ファイルで受ける。並行が要れば fan-out。
-- **turn ドライバ** (極小): app-server への JSON-RPC を 1 ターン分だけ実行する薄いクライアント
-  (可能なら codex 純正の `app-server proxy` を使い自前実装を最小化)。**唯一残す実装らしい実装**。
+- **turn ドライバ** (極小): app-server への JSON-RPC を 1 ターン分だけ実行する薄い自前 ws
+  クライアント (`scripts/codex-turn.mts`)。**唯一残す実装らしい実装**。
 - **hook**: Stop gate (数行、任意)。
 
 ## セキュリティ・モデル
@@ -135,8 +140,9 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
   (1) app-server は **capability token 認証** (`--ws-auth capability-token`、loopback でも機能することを
   実測) つきで起動し、セッションごとに生成した token を知らないプロセスは handshake で拒否される。
   これにより別セッション・他ツールの誤接続とポートスキャン経由の接続は塞がる。
-  (2) turn ドライバは接続後に封じ込めプローブ (`command/exec` で $HOME 書込不可 & 対象 cwd 書込可) を
-  行い、sandbox 外で起動された server への誤接続を fail-closed で拒否する。
+  (2) turn ドライバは token 必須・loopback 限定で、接続後に封じ込めプローブ (`command/exec` で
+  $HOME と /tmp 直下が書込不可 & 対象 cwd が書込可) を行い、sandbox 外で起動された server への
+  誤接続を fail-closed で拒否する。
   限界: 同一ユーザーで能動的に動く攻撃者 (token ファイルや `~/.codex` の資格情報を読める) は
   どの方式でも防げない — これは OS のユーザー境界の問題で、本設計のスコープ外。
 
@@ -174,11 +180,16 @@ spike 全項目決着 (詳細: `docs/plan.md`、実測: canon `facts/codex/claud
 
 - `scripts/codex-turn.mts` — turn ドライバ。ws (`ws://127.0.0.1:41100` 既定, `CODEX_BRIDGE_PORT`) で
   常駐 app-server に接続し 1 turn (または native `review/start`) を駆動。
+  - **loopback 限定 + capability token 必須** (token を送る前に endpoint を検証。token 無しは起動拒否)。
   - sandbox は thread (`sandbox`) と turn (`sandboxPolicy`) の両方で danger 固定。未知フラグは拒否。
   - **封じ込めプローブ**: turn 前に `command/exec` (danger, トークン消費なし) で
-    「$HOME 書込不可 かつ 対象 cwd 書込可」を検査。sandbox 外の server・別セッションの server は拒否。
+    「$HOME と /tmp 直下が書込不可 かつ 対象 cwd が書込可」を検査。sandbox 外の server・
+    別セッションの server は拒否。
   - approval 系の server 要求はメソッド別の schema-valid な deny で fail-closed。
-  - SIGTERM/SIGINT で `turn/interrupt` を送ってから終了 (TaskStop でサーバー側 turn も止まる)。
+  - イベントは threadId + turnId で自 turn のものだけ採用 (並行 driver・子 turn と混線しない)。
+  - 制御系 RPC (initialize/thread/turn-start) はタイムアウト付き。turn 完了待ちのみ無制限。
+  - SIGTERM/SIGINT で `turn/interrupt` を送ってから終了 (turn/start 応答待ち中でも turn id を
+    待ってから interrupt する)。TaskStop でサーバー側 turn も止まる。
 - `tests/codex-turn.test.mjs` — mock app-server で上記不変条件を pin (`node --test tests/codex-turn.test.mjs`)。
 - plugin 一式: `.claude-plugin/plugin.json`, `commands/codex-task.md`, `commands/codex-review.md`,
   `skills/codex-bridge/SKILL.md` (起動レシピ・材料束・egress 提示)。

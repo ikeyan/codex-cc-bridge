@@ -26,6 +26,8 @@ Codex を Claude Code から使うための薄い橋。1 セッション 1 常�
 
 ## 前提 (`~/.claude/settings.json`)
 
+- `sandbox.enabled`: `true`, `sandbox.failIfUnavailable`: `true` — sandbox 有効が全体の前提。
+- `sandbox.network.allowLocalBinding`: `true` — app-server の localhost listen 用 (macOS)。
 - `sandbox.filesystem.allowWrite`: `["~/.codex"]`
 - `sandbox.network.allowedDomains`: `["api.openai.com","auth.openai.com","chatgpt.com","*.chatgpt.com"]`
 - 認証確認: `codex login status` (未ログインなら ユーザーに `! codex login` を案内)。
@@ -53,17 +55,16 @@ env `CODEX_BRIDGE_PORT` で両方を一括で切り替える。server は **capa
 
 ## 1 ターンの駆動
 
-prompt は stdin から渡す (材料束の入口)。**必ず quoted heredoc** で渡す —
-`echo "<prompt>"` は材料中の `$(...)`/バッククォート/引用符をシェル展開してしまう。
-turn は原則 run_in_background の Bash で:
+prompt は stdin から渡す (材料束の入口)。**Write ツールで一時ファイルに書き、`<` でリダイレクト**
+する — シェルに内容を通さないので、展開 (`$(...)`/バッククォート) も heredoc 終端行の衝突も
+起きない。turn は原則 run_in_background の Bash で:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> <<'CODEX_PROMPT'
-<prompt including materials, verbatim>
-CODEX_PROMPT
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> < /path/to/prompt.txt
 ```
 
-(`--token-file` の代わりに env `CODEX_BRIDGE_TOKEN_FILE` でも渡せる。)
+(`--token-file` の代わりに env `CODEX_BRIDGE_TOKEN_FILE` でも渡せる。token 無しでは driver が
+起動を拒否する。)
 
 - 結果: stdout に JSON `{ threadId, turnStatus, turnError, finalMessage, tokenUsage }`。
 - 進捗: stderr に 1 行 1 イベント (コマンド実行・エージェントメッセージ)。Monitor で追える。
@@ -71,9 +72,10 @@ CODEX_PROMPT
   server 側の turn も止まる (放置トークン消費なし)。
 - マルチターン: 結果の `threadId` を `--thread <id>` に渡すと文脈込みで継続する。
 - 構造化出力: `--schema <file.json>` (JSON Schema) で最終メッセージを constrained にできる。
-- ネイティブレビュー: `--review-target -` で target JSON を stdin (quoted heredoc) から渡す。
-  target は `{"type":"uncommittedChanges"}` / `{"type":"baseBranch","branch":"main"}` /
-  `{"type":"commit","sha":"..."}` / `{"type":"custom","instructions":"..."}`。
+- ネイティブレビュー: `--review-target -` で target JSON を stdin (Write したファイルの
+  リダイレクト) から渡す。target は `{"type":"uncommittedChanges"}` /
+  `{"type":"baseBranch","branch":"main"}` / `{"type":"commit","sha":"..."}` /
+  `{"type":"custom","instructions":"..."}`。
 - モデル/効力: `--model M` / `--effort E` (任意)。
 - 並行: 独立したタスクは複数 background task で fan-out してよい
   (1 app-server で複数 thread の並行 turn が可能)。律速は CC 側の並行数。

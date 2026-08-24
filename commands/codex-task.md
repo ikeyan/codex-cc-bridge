@@ -20,14 +20,13 @@ Steps:
    materials you curate (file excerpts, diffs, spec fragments). Before sending, tell the
    user in one short line what is being sent to OpenAI (scope, not full content).
    If the arguments contain `--thread <id>`, pass it through to continue that thread.
-3. **Run the turn** as a background task (unless it is trivially small). Feed the prompt
-   via a QUOTED heredoc — never `echo "<prompt>"`, which shell-expands `$(...)`, backticks
-   and quotes inside the material bundle:
+3. **Run the turn** as a background task (unless it is trivially small). Write the prompt
+   (including materials) to a temp file with the Write tool, then feed it via stdin
+   redirection — never `echo "<prompt>"` or a heredoc: echo shell-expands `$(...)`,
+   backticks and quotes, and a heredoc breaks if the material contains its delimiter line:
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> [--thread <id>] [--model <m>] [--schema <file>] <<'CODEX_PROMPT'
-   <prompt including materials, pasted verbatim>
-   CODEX_PROMPT
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> [--thread <id>] [--model <m>] [--schema <file>] < /path/to/prompt.txt
    ```
 
    (`<TOKEN_FILE>` is the capability-token file from the skill's launch recipe.)

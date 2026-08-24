@@ -27,14 +27,13 @@ Steps:
    to OpenAI (e.g. `git status --short` / `git diff --stat` for the chosen target). If the
    working tree contains obviously sensitive unstaged files, point that out and narrow the
    target instead of sending them.
-4. **Run the review as a background task** (reviews regularly take >10 minutes). Feed the
-   target JSON via stdin (`--review-target -`) with a QUOTED heredoc so branch names,
-   shas, or instructions never get shell-expanded:
+4. **Run the review as a background task** (reviews regularly take >10 minutes). Write the
+   target JSON to a temp file with the Write tool and feed it via stdin redirection
+   (`--review-target -`) so branch names, shas, or instructions never pass through the
+   shell (no expansion, no heredoc-delimiter collisions):
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> --review-target - <<'CODEX_TARGET'
-   <target-json>
-   CODEX_TARGET
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> --review-target - < /path/to/target.json
    ```
 
    (`<TOKEN_FILE>` is the capability-token file from the skill's launch recipe.)
