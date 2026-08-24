@@ -8,10 +8,13 @@
   一次情報か実測で裏を取る。確定済みの事実は `ikeyan/canon` の `facts/codex/` を引く/追記する。
 - スクリプトは node 組み込みを優先 (引数解析は `node:util` の `parseArgs`)、型付き .mts
   (erasable types のみ、Node >= 23.6 の type stripping で直接実行) で書く。依存ゼロを維持。
-- テスト: `node --test tests/codex-turn.test.mjs`
-- 型チェック: `deno check scripts/codex-turn.mts` (インストール不要で最速。tsc なら strict +
-  `erasableSyntaxOnly` + `@types/node` で通ること)。runtime 非依存に書く —
-  `NodeJS.Timeout` でなく `ReturnType<typeof setTimeout>` (bun/deno でも動作確認済み)。
+- 検証は 1 コマンド: `npm test` (= `node scripts/check.mts`)。driver を node/deno/bun で回す
+  テスト行列 + `deno check` + `tsc` (strict, `erasableSyntaxOnly`)。tsc には devDependencies が
+  必要 (`bun install` か `npm install`)。個別実行: `node --test tests/codex-turn.test.mjs` /
+  `deno check scripts/*.mts` / `node_modules/.bin/tsc -p .`。
+- 型は runtime 非依存に書く — `NodeJS.Timeout` でなく `ReturnType<typeof setTimeout>`。
+  tsconfig.json は tsc 専用、deno.json は deno check 専用 (lib が非互換なため分離。両ファイルの
+  コメント参照)。
 - 実行済みの設計メモは git 履歴に委ねて整理する。
 - コミット末尾に Co-Authored-By と Claude-Session の trailer を付ける
   (セッション URL はセッションごとに違うので使い回さない)。

@@ -18,4 +18,5 @@ Claude Code のネイティブ機能 (Background Task・完了通知・Monitor�
   1 turn / 1 review を駆動する極小 ws クライアント。sandbox は danger-full-access 固定 (fail-closed)。
 - `commands/codex-task.md`, `commands/codex-review.md` — slash commands。
 - `skills/codex-bridge/SKILL.md` — 起動レシピ・材料束・セキュリティ不変条件。
-- `tests/codex-turn.test.mjs` — 不変条件を pin (`node --test tests/codex-turn.test.mjs`)。
+- `tests/codex-turn.test.mjs` — 不変条件を pin。検証一式は `npm test`
+  (driver を node/deno/bun で回すテスト行列 + `deno check` + `tsc`)。

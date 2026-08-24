@@ -20,6 +20,17 @@ import { join } from "node:path";
 const DRIVER = fileURLToPath(new URL("../scripts/codex-turn.mts", import.meta.url));
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+// The harness always runs on node; CODEX_TURN_DRIVER_RUNTIME selects which
+// runtime executes the driver under test (node | deno | bun).
+const DRIVER_CMD = (() => {
+  const rt = process.env.CODEX_TURN_DRIVER_RUNTIME ?? "node";
+  if (rt === "deno") return ["deno", "run", "--quiet", "--allow-env", "--allow-read", "--allow-net", DRIVER];
+  if (rt === "bun") return ["bun", DRIVER];
+  return [process.execPath, DRIVER];
+})();
+const spawnDriver = (args, env) =>
+  spawn(DRIVER_CMD[0], [...DRIVER_CMD.slice(1), ...args], { env: { ...process.env, ...env } });
+
 // A token file shared by all tests (the driver refuses to run without one).
 const TOKEN_PATH = join(mkdtempSync(join(tmpdir(), "codex-turn-test-")), "token");
 writeFileSync(TOKEN_PATH, "sekrit-token-123\n", { mode: 0o600 });
@@ -150,9 +161,7 @@ function appServerBehaviour(
 function runDriver(args, { port, stdin, env, noToken } = {}) {
   const fullArgs = noToken || args.includes("--token-file") ? args : ["--token-file", TOKEN_PATH, ...args];
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [DRIVER, ...fullArgs], {
-      env: { ...process.env, ...(port ? { CODEX_BRIDGE_PORT: String(port) } : {}), ...env },
-    });
+    const child = spawnDriver(fullArgs, { ...(port ? { CODEX_BRIDGE_PORT: String(port) } : {}), ...env });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -446,8 +455,8 @@ test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
     }),
   );
   const result = new Promise((resolve) => {
-    child = spawn(process.execPath, [DRIVER, "--token-file", TOKEN_PATH, "--cwd", "/tmp"], {
-      env: { ...process.env, CODEX_BRIDGE_PORT: String(server.port) },
+    child = spawnDriver(["--token-file", TOKEN_PATH, "--cwd", "/tmp"], {
+      CODEX_BRIDGE_PORT: String(server.port),
     });
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d));
@@ -482,8 +491,8 @@ test("SIGTERM racing the turn/start response still interrupts the turn", async (
     }
   });
   const result = new Promise((resolve) => {
-    child = spawn(process.execPath, [DRIVER, "--token-file", TOKEN_PATH, "--cwd", "/tmp"], {
-      env: { ...process.env, CODEX_BRIDGE_PORT: String(server.port) },
+    child = spawnDriver(["--token-file", TOKEN_PATH, "--cwd", "/tmp"], {
+      CODEX_BRIDGE_PORT: String(server.port),
     });
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d));

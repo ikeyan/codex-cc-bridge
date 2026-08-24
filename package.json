@@ -1,0 +1,12 @@
+{
+  "name": "codex-cc-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/check.mts"
+  },
+  "devDependencies": {
+    "@types/node": "^24",
+    "typescript": "^7"
+  }
+}

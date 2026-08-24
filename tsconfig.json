@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "es2023",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["es2023"],
+    "types": ["node"],
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true
+  },
+  "files": ["scripts/codex-turn.mts", "scripts/check.mts"]
+}
