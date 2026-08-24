@@ -1,6 +1,6 @@
 # codex-cc-bridge 設計仕様
 
-> 状態: 設計 (実装前)。この文書が唯一のソース。実装が始まったら「実装状況」節を更新する。
+> 状態: 実装中 (spike 完了・初版実装あり)。この文書が唯一のソース。「実装状況」節を参照。
 
 ## 目的
 
@@ -131,6 +131,12 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
 - **egress は防げない**: Codex に渡したプロンプト・材料 (diff/ファイル/トランスクリプト) は OpenAI に
   送信される。サンドボックスは egress を止めない。working-tree レビューは未ステージの WIP も送りうる。
   → 送信前に Claude が範囲を提示し、必要なら redact する運用を仕様に含める。
+- **残余リスク (実装済みの緩和と限界)**: turn ドライバは接続時に封じ込めプローブ (`command/exec` で
+  $HOME 書込不可 & 対象 cwd 書込可) を行い、sandbox 外の app-server と別リポジトリのセッションの
+  app-server への誤接続を fail-closed で拒否する。ただし loopback ws に認証は無いため、
+  (a) **同一 checkout を並行する別 CC セッションの server** はプローブで区別できない
+  (運用: セッションごとに `CODEX_BRIDGE_PORT` を分ける)、(b) 同一マシンの任意ローカルプロセスが
+  常駐 server に接続できる (副作用はその server の Claude sandbox 内に閉じる)。
 
 ## 検証 (done の条件)
 
@@ -140,17 +146,33 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
 - 常駐 app-server が CC のターンをまたいで生存し、かつ sandbox に閉じ続けることを実測 (§未解決 1)。
 - egress レビュー材料の範囲提示が働くことを確認。
 
-## 未解決事項 (実装前に確定させる)
+## 実装状況 (2026-08-24)
 
-1. **常駐 app-server の寿命**: `run_in_background` で立てた長寿命プロセスが CC のセッション/ターンを
-   またいで生存し、かつ Claude sandbox に閉じ続けるか。閉じ続けないなら「セッション開始で起動 +
-   健全性チェック + 必要時再起動」の運用を定義する。codex 純正 `app-server daemon` の利用可否も要検証。
-2. **JSON-RPC を自前で駆動 vs `app-server proxy`**: どちらが薄いか。プロトコル変更耐性も含めて選ぶ。
-3. **app-server turn の出力スキーマ指定方法**: `codex exec --output-schema` と app-server RPC で
-   スキーマ指定の口が同じか差があるか。
-4. **並行の上限**: fan-out するサブエージェント数と、1 app-server 上の並行 thread 数のどちらで
-   律速すべきか。
-5. **モデル一覧 refresh の副次ホスト**を allowlist に足すか (非致命なので既定は放置)。
+spike 全項目決着 (詳細: `docs/plan.md`、実測: canon `facts/codex/claude-sandbox-integration.md`)。初版実装済み:
+
+- `scripts/codex-turn.mjs` — turn ドライバ。ws (`ws://127.0.0.1:41100` 既定, `CODEX_BRIDGE_PORT`) で
+  常駐 app-server に接続し 1 turn (または native `review/start`) を駆動。
+  - sandbox は thread (`sandbox`) と turn (`sandboxPolicy`) の両方で danger 固定。未知フラグは拒否。
+  - **封じ込めプローブ**: turn 前に `command/exec` (danger, トークン消費なし) で
+    「$HOME 書込不可 かつ 対象 cwd 書込可」を検査。sandbox 外の server・別セッションの server は拒否。
+  - approval 系の server 要求はメソッド別の schema-valid な deny で fail-closed。
+  - SIGTERM/SIGINT で `turn/interrupt` を送ってから終了 (TaskStop でサーバー側 turn も止まる)。
+- `tests/codex-turn.test.mjs` — mock app-server で上記不変条件を pin (`node --test tests/codex-turn.test.mjs`)。
+- plugin 一式: `.claude-plugin/plugin.json`, `commands/codex-task.md`, `commands/codex-review.md`,
+  `skills/codex-bridge/SKILL.md` (起動レシピ・材料束・egress 提示)。
+- 検証 (done の条件) の実測状況: 封じ込め (HOME 不可/TMPDIR・repo 可) ✓、fail-closed pin ✓、
+  セッション内常駐 ✓ (セッション跨ぎは起動レシピで対応)、egress 範囲提示は commands の手順に組込。
+- 未実装: Stop 前レビュー gate hook (spec で任意。後続)。
+
+## 未解決事項 (解決済み — 経緯は docs/plan.md)
+
+1. **常駐 app-server の寿命**: 解決。unix socket/`daemon`/`proxy` は sandbox 内で bind 不可のため
+   **`--listen ws://127.0.0.1:PORT`** で常駐。セッション内は生存、セッション跨ぎは
+   「`/readyz` チェック + 必要時再起動」(skill の起動レシピ)。
+2. **自前 vs proxy**: 自前の極小 ws クライアントで確定 (proxy は sandbox 内で成立しない)。
+3. **出力スキーマ**: `turn/start` の `outputSchema` がネイティブに存在し機能 (実測)。
+4. **並行の上限**: 1 app-server で複数 thread 並行が成立 (実測)。律速は CC 側 fan-out。
+5. **副次ホスト**: 放置で確定 (非致命)。
 
 ## 参考
 
