@@ -1,4 +1,4 @@
-// Pins the security invariants of scripts/codex-turn.mjs against a mock app-server:
+// Pins the security invariants of scripts/codex-turn.mts against a mock app-server:
 //   - a containment probe (command/exec) runs BEFORE any thread is started;
 //     HOME writable or cwd non-writable aborts the run
 //   - thread/start & thread/resume always carry sandbox "danger-full-access" + approvalPolicy "never"
@@ -13,7 +13,7 @@ import crypto from "node:crypto";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const DRIVER = fileURLToPath(new URL("../scripts/codex-turn.mjs", import.meta.url));
+const DRIVER = fileURLToPath(new URL("../scripts/codex-turn.mts", import.meta.url));
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 // Minimal RFC6455 text-frame server good enough for JSON-RPC lines in tests.
@@ -257,7 +257,7 @@ test("unknown flags are rejected before connecting (no sandbox injection path)",
   ]) {
     const r = await runDriver(args, { port: server.port, stdin: "x" });
     assert.equal(r.code, 2, `expected rejection for ${args[0]}`);
-    assert.match(r.stderr, /unknown flag/);
+    assert.match(r.stderr, /Unknown option/i);
   }
   server.close();
   assert.equal(connected, false);

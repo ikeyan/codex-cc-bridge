@@ -32,7 +32,7 @@ Steps:
    shas, or instructions never get shell-expanded:
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs" --cwd "$PWD" --token-file <TOKEN_FILE> --review-target - <<'CODEX_TARGET'
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> --review-target - <<'CODEX_TARGET'
    <target-json>
    CODEX_TARGET
    ```

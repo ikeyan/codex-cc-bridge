@@ -27,7 +27,7 @@
 
 ```
 .claude-plugin/plugin.json        # name: codex-cc-bridge
-scripts/codex-turn.mjs            # 唯一の実装らしい実装: 1 ターン駆動の極小 ws クライアント
+scripts/codex-turn.mts            # 唯一の実装らしい実装: 1 ターン駆動の極小 ws クライアント
 commands/codex-task.md            # /codex-task  — 材料束 + プロンプトで 1 turn (background)
 commands/codex-review.md          # /codex-review — review/start ネイティブレビュー (background)
 skills/codex-bridge/SKILL.md      # 起動レシピ・材料束・egress 提示・セキュリティ不変条件
@@ -37,7 +37,7 @@ docs/spec.md                      # 実装状況を追記
 
 hook (Stop 前レビュー gate) は spec で任意 → 初版では見送り、後続タスク。
 
-## `scripts/codex-turn.mjs` の契約
+## `scripts/codex-turn.mts` の契約
 
 - 入力: prompt は **stdin** (材料束の入口) または `--prompt`。
   フラグ: `--cwd DIR` / `--thread ID` (resume) / `--schema FILE` / `--model M` / `--effort E` /

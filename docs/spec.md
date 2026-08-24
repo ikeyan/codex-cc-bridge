@@ -154,9 +154,11 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
   bind/listen を許可する設定は存在しない (公式 docs + 実測)。
 - **socket unlink + fd 保持 / endpoint を持たない stdio 構成**: 却下。unlink 方式は AF_UNIX bind
   不可の時点で不成立 (TCP に unlink 相当は無い)。fd を後続ターンの driver に渡すには結局
-  IPC endpoint か「全 driver の親となる常駐 broker」が必要で、本設計が捨てた broker 層の再導入に
-  なる。stdio 構成は endpoint を持たない唯一の完全解だが、常駐要件と CC のプロセスモデル
-  (ターンごとに独立プロセス) に矛盾する。
+  IPC endpoint か「全 driver の親となる常駐プロセス」が必要になる。それ自体が禁じ手なのではなく
+  (目標は broker の排除ではなく、機能を保って複雑さを減らすこと)、この案が達成するアクセス制御は
+  capability token と同等で、可動部品 (常駐親プロセス + fd 受け渡し) だけが増える —
+  複雑さの純増になるため採らない。stdio 構成は endpoint を持たない唯一の完全解だが、
+  常駐要件と CC のプロセスモデル (ターンごとに独立プロセス) に矛盾する。
 
 ## 検証 (done の条件)
 
@@ -170,7 +172,7 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
 
 spike 全項目決着 (詳細: `docs/plan.md`、実測: canon `facts/codex/claude-sandbox-integration.md`)。初版実装済み:
 
-- `scripts/codex-turn.mjs` — turn ドライバ。ws (`ws://127.0.0.1:41100` 既定, `CODEX_BRIDGE_PORT`) で
+- `scripts/codex-turn.mts` — turn ドライバ。ws (`ws://127.0.0.1:41100` 既定, `CODEX_BRIDGE_PORT`) で
   常駐 app-server に接続し 1 turn (または native `review/start`) を駆動。
   - sandbox は thread (`sandbox`) と turn (`sandboxPolicy`) の両方で danger 固定。未知フラグは拒否。
   - **封じ込めプローブ**: turn 前に `command/exec` (danger, トークン消費なし) で

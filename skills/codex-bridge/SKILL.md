@@ -7,7 +7,7 @@ description: Run OpenAI Codex turns from Claude Code through a resident app-serv
 
 Codex を Claude Code から使うための薄い橋。1 セッション 1 常駐 `codex app-server` を
 **Claude sandbox 内**で立て、1 ターン = 1 background task として
-`${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs` で駆動する。
+`${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts` で駆動する。
 
 ## セキュリティ不変条件 (絶対に守る)
 
@@ -58,7 +58,7 @@ prompt は stdin から渡す (材料束の入口)。**必ず quoted heredoc** �
 turn は原則 run_in_background の Bash で:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs" --cwd "$PWD" --token-file <TOKEN_FILE> <<'CODEX_PROMPT'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> <<'CODEX_PROMPT'
 <prompt including materials, verbatim>
 CODEX_PROMPT
 ```

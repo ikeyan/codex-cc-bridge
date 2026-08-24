@@ -25,7 +25,7 @@ Steps:
    and quotes inside the material bundle:
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mjs" --cwd "$PWD" --token-file <TOKEN_FILE> [--thread <id>] [--model <m>] [--schema <file>] <<'CODEX_PROMPT'
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> [--thread <id>] [--model <m>] [--schema <file>] <<'CODEX_PROMPT'
    <prompt including materials, pasted verbatim>
    CODEX_PROMPT
    ```
