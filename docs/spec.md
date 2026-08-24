@@ -140,6 +140,24 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
   限界: 同一ユーザーで能動的に動く攻撃者 (token ファイルや `~/.codex` の資格情報を読める) は
   どの方式でも防げない — これは OS のユーザー境界の問題で、本設計のスコープ外。
 
+### 却下した代替案 (アクセス制御まわり)
+
+- **token ファイルの起動後削除 (秘密を server メモリ + Claude コンテキストのみに)**: 却下。
+  server は token を起動時にメモリ保持するため技術的には成立する (実測) が、堅牢化にならない。
+  削除すると以後 Claude が token を毎ターン持ち回ることになり、(a) token が会話経由で
+  セッショントランスクリプト (`~/.claude/projects/`) に永続化、(b) 再具現化のたびにコマンドライン
+  (ps) へ露出、(c) コンテキスト圧縮で token を失うと誰も認証できない server がポートを占有する
+  ロックアウトが起きる。ファイル保持 (0600) なら token 文字列は一度もデータとして持ち回られない
+  (Claude が扱うのはパスのみ)。
+- **unix socket への移行**: 却下。Claude sandbox は AF_UNIX を bind/connect とも既定拒否で、
+  設定 (`sandbox.network.allowUnixSockets` / `allowAllUnixSockets`) は **connect のみ**を開ける口。
+  bind/listen を許可する設定は存在しない (公式 docs + 実測)。
+- **socket unlink + fd 保持 / endpoint を持たない stdio 構成**: 却下。unlink 方式は AF_UNIX bind
+  不可の時点で不成立 (TCP に unlink 相当は無い)。fd を後続ターンの driver に渡すには結局
+  IPC endpoint か「全 driver の親となる常駐 broker」が必要で、本設計が捨てた broker 層の再導入に
+  なる。stdio 構成は endpoint を持たない唯一の完全解だが、常駐要件と CC のプロセスモデル
+  (ターンごとに独立プロセス) に矛盾する。
+
 ## 検証 (done の条件)
 
 - app-server を Claude sandbox 内で起動 → `danger-full-access` thread で 1 ターンを回し、
