@@ -1,6 +1,6 @@
 # codex-cc-bridge 実装計画
 
-> spec: `docs/spec.md` / 引き継ぎ: `docs/handoff.md` / 実測台帳: `ikeyan/canon` `facts/codex/claude-sandbox-integration.md`
+> spec: `docs/spec.md` / 実測台帳: `ikeyan/canon` `facts/codex/claude-sandbox-integration.md`
 > 状態: spike 完了 (2026-08-24, codex-cli 0.149.0)。本計画は spike の決着を反映済み。
 
 ## spike の決着 (spec「未解決事項」への回答)
@@ -56,7 +56,7 @@ hook (Stop 前レビュー gate) は spec で任意 → 初版では見送り、
 1. driver 実装 + mock テスト (sandbox 固定 pin、未知フラグ拒否、resume 経路)。
 2. 実機 E2E: 常駐 app-server に対し task turn / schema turn / review turn を各 1 回。
 3. plugin 化 (plugin.json, commands, skill)。
-4. spec の「実装状況」更新、handoff の完了項目更新。
+4. spec の「実装状況」更新。
 
 ## セキュリティ不変条件 (変更禁止)
 

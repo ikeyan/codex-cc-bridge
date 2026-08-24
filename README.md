@@ -1,16 +1,21 @@
 # codex-cc-bridge
 
-Claude Code から OpenAI Codex を使うための、薄いプラグイン/ツール群の**設計リポジトリ** (実装前)。
+Claude Code から OpenAI Codex を使うための、薄いプラグイン。
 
-既存の `openai/codex-plugin-cc` が自前で持つランタイム・ジョブ・状態・転送の各層を、いまの
+既存の `openai/codex-plugin-cc` が自前で持つランタイム・ジョブ・状態・転送の各層を、
 Claude Code のネイティブ機能 (Background Task・完了通知・Monitor・TaskStop) と
-`codex app-server` / `codex exec` のネイティブ機能に寄せて実装量を減らす。同時に Codex の実行権限を
-**Claude Code のサンドボックスの部分集合**に閉じ込めることを correctness 要件とする。
+`codex app-server` のネイティブ機能 (thread/turn RPC・outputSchema・review/start) に寄せて
+実装量を減らす。同時に Codex の実行権限を **Claude Code のサンドボックスの部分集合**に
+閉じ込めることを correctness 要件とする。
 
-- 仕様: [docs/spec.md](docs/spec.md)
-- 実装引き継ぎ (spec 外の具体情報): [docs/handoff.md](docs/handoff.md)
-- app-server を warm な常駐ランタイムとして使い、1 ターン (メッセージ→返信) を CC の Background Task として動かす。
-- Codex の thread は必ず `danger-full-access` で開始し、Claude sandbox 内で起動することで
-  「Codex の副作用 ⊆ Claude sandbox」を構成的に満たす。
+- 仕様・実装状況・セキュリティモデル: [docs/spec.md](docs/spec.md) (唯一のソース)
+- 実装計画と spike の決着: [docs/plan.md](docs/plan.md)
+- 実測台帳: `ikeyan/canon` の `facts/codex/claude-sandbox-integration.md`
 
-現状はまだ設計段階。実装は仕様の「未解決事項」を確定してから着手する。
+## 構成
+
+- `scripts/codex-turn.mts` — 常駐 app-server (Claude sandbox 内, capability token 認証) に対し
+  1 turn / 1 review を駆動する極小 ws クライアント。sandbox は danger-full-access 固定 (fail-closed)。
+- `commands/codex-task.md`, `commands/codex-review.md` — slash commands。
+- `skills/codex-bridge/SKILL.md` — 起動レシピ・材料束・セキュリティ不変条件。
+- `tests/codex-turn.test.mjs` — 不変条件を pin (`node --test tests/codex-turn.test.mjs`)。
