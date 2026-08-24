@@ -8,6 +8,7 @@ Claude Code のネイティブ機能 (Background Task・完了通知・Monitor�
 **Claude Code のサンドボックスの部分集合**に閉じ込めることを correctness 要件とする。
 
 - 仕様: [docs/spec.md](docs/spec.md)
+- 実装引き継ぎ (spec 外の具体情報): [docs/handoff.md](docs/handoff.md)
 - app-server を warm な常駐ランタイムとして使い、1 ターン (メッセージ→返信) を CC の Background Task として動かす。
 - Codex の thread は必ず `danger-full-access` で開始し、Claude sandbox 内で起動することで
   「Codex の副作用 ⊆ Claude sandbox」を構成的に満たす。

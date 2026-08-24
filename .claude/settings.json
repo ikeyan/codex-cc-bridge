@@ -1,0 +1,14 @@
+{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "ikeyan-skills@ikeyan": true
+  },
+  "extraKnownMarketplaces": {
+    "ikeyan": {
+      "source": {
+        "source": "github",
+        "repo": "ikeyan/agent-files"
+      }
+    }
+  }
+}
