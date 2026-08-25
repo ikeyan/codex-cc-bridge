@@ -10,8 +10,11 @@
   (erasable types のみ、Node >= 23.6 の type stripping で直接実行) で書く。依存ゼロを維持。
 - 検証は 1 コマンド: `npm test` (= `node scripts/check.mts`)。driver を node/deno/bun で回す
   テスト行列 + `deno check` + `tsc` (strict, `erasableSyntaxOnly`)。tsc には devDependencies が
-  必要 (`bun install` か `npm install`)。個別実行: `node --test tests/codex-turn.test.mjs` /
-  `deno check scripts/*.mts` / `node_modules/.bin/tsc -p .`。
+  必要 (`npm install`。lockfile は package-lock.json に一本化)。個別実行:
+  `node --test tests/codex-turn.test.mjs` / `deno check scripts/*.mts` / `node_modules/.bin/tsc -p .`。
+  注意: Claude sandbox 内の `npm install` は既定キャッシュ (`~/.npm/_cacache`) 書込が EPERM で失敗し、
+  npm がこれを「root 所有キャッシュ」と誤診することがある (実際は root 所有ではない)。
+  sandbox 内では `npm install --cache "$TMPDIR/npm-cache"` を使う。
 - 型は runtime 非依存に書く — `NodeJS.Timeout` でなく `ReturnType<typeof setTimeout>`。
   tsconfig.json は tsc 専用、deno.json は deno check 専用 (lib が非互換なため分離。両ファイルの
   コメント参照)。
