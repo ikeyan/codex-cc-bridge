@@ -18,7 +18,7 @@ jobs:
       # `npm test` (scripts/check.mts) runs the mock test suite with the driver
       # under node, deno, and bun, plus `deno check` and `tsc`. All three
       # runtimes must be present or the corresponding steps fail.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
