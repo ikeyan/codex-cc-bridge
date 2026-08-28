@@ -1,6 +1,7 @@
 {
   "name": "codex-cc-bridge",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "test": "node scripts/check.mts"

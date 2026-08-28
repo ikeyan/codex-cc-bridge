@@ -12,6 +12,21 @@ Claude Code のネイティブ機能 (Background Task・完了通知・Monitor�
 - 実装計画と spike の決着: [docs/plan.md](docs/plan.md)
 - 実測台帳: `ikeyan/canon` の `facts/codex/claude-sandbox-integration.md`
 
+## インストール
+
+`ikeyan` marketplace 経由:
+
+```
+/plugin marketplace add ikeyan/agent-files
+/plugin install codex-cc-bridge@ikeyan
+/reload-plugins
+```
+
+インストール後は `/codex-task`・`/codex-review` が使える。初回は `codex-bridge` skill の
+起動レシピ (capability token 生成 → 常駐 app-server 起動) を踏む。前提となる Claude Code の
+`~/.claude/settings.json` (`sandbox.enabled` / `allowLocalBinding` / `~/.codex` 書込許可 ほか) は
+[docs/spec.md](docs/spec.md) の「Claude Code 側の必要設定」を参照。
+
 ## 構成
 
 - `scripts/codex-turn.mts` — 常駐 app-server (Claude sandbox 内, capability token 認証) に対し
