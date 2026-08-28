@@ -1,5 +1,7 @@
 # codex-cc-bridge
 
+[![CI](https://github.com/ikeyan/codex-cc-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/ikeyan/codex-cc-bridge/actions/workflows/ci.yml)
+
 Claude Code から OpenAI Codex を使うための、薄いプラグイン。
 
 既存の `openai/codex-plugin-cc` が自前で持つランタイム・ジョブ・状態・転送の各層を、
