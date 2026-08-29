@@ -13,7 +13,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `npm test` (scripts/check.mts) runs the mock test suite with the driver
       # under node, deno, and bun, plus `deno check` and `tsc`. All three
