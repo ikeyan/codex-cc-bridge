@@ -1,7 +1,6 @@
 ---
 description: Delegate a task or question to Codex (one turn on the resident app-server)
 argument-hint: '[--thread <id>] [--model <m>] [--schema <file>] <task description>'
-disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(curl:*), Bash(codex:*), Bash(echo:*), Bash(git:*)
 ---
 

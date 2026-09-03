@@ -165,6 +165,13 @@ OpenAI Codex を Claude Code (CC) から使うための、**薄い**プラグイ
   capability token と同等で、可動部品 (常駐親プロセス + fd 受け渡し) だけが増える —
   複雑さの純増になるため採らない。stdio 構成は endpoint を持たない唯一の完全解だが、
   常駐要件と CC のプロセスモデル (ターンごとに独立プロセス) に矛盾する。
+- **slash command の `disable-model-invocation: true` (モデルからの自発呼び出し禁止)**: 却下し、
+  初版にあった指定を削除。これは境界として機能していない — skill (`codex-bridge`) は
+  model-invocable のままで起動レシピと driver の叩き方を全て含むため、モデルは command を
+  経由せず素の Bash で同じ turn を回せる。実際の防御は不変条件 (sandbox 内起動・danger 固定・
+  token 必須・封じ込めプローブ・egress 範囲提示) 側にあり、フラグはそれと独立。
+  egress 範囲提示は呼び出し後の手順なので、呼び出し経路を絞る理由にもならない。
+  残る効果は「近道を塞ぐ」だけで、機能を保ったまま可動部品を 1 つ減らせる。
 
 ## 検証 (done の条件)
 
