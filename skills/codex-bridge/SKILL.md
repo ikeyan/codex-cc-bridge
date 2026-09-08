@@ -13,7 +13,7 @@ Codex を Claude Code から使うための薄い橋。1 セッション 1 常�
 
 1. app-server は **Claude sandbox 内** (通常の Bash / run_in_background) で、**capability token
    認証つき**で起動する (起動レシピ参照)。token を知らないローカルプロセスは接続できない。
-   driver はさらに turn 前に封じ込めプローブ (`command/exec` で $HOME 書込不可 & 対象 cwd 書込可) を
+   driver はさらに turn 前に封じ込めプローブ (`command/exec` で $HOME・/tmp 直下 書込不可 & 対象 cwd 書込可) を
    自動実行し、sandbox 外の server や別セッションの server には fail-closed で接続を拒否する。
 2. thread/turn の sandbox は driver が `danger-full-access` に固定している (変更不可)。
    これで Codex のコマンド実行は Claude sandbox の部分集合に閉じる

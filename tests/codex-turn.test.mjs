@@ -260,6 +260,35 @@ test("containment: cwd not writable => refuse (wrong session's server)", async (
   assert.equal(findRequest(recorded, "thread/start"), undefined);
 });
 
+test("containment: probe output that is not three known words => refuse, not misdiagnose", async () => {
+  for (const probeStdout of ["", "garbage", "BLOCKED BLOCKED", "BLOCKED BLOCKED MAYBE"]) {
+    const recorded = [];
+    const server = await startMockServer(appServerBehaviour(recorded, { probeStdout }));
+    const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "hi" });
+    server.close();
+    assert.notEqual(r.code, 0, JSON.stringify(probeStdout));
+    assert.match(r.stderr, /probe output/, JSON.stringify(probeStdout));
+    assert.doesNotMatch(r.stderr, /NOT confined/, JSON.stringify(probeStdout));
+    assert.equal(findRequest(recorded, "thread/start"), undefined, JSON.stringify(probeStdout));
+  }
+});
+
+test("a non-numeric control timeout override is rejected, not turned into NaN", async () => {
+  let connected = false;
+  const server = await startMockServer(() => {
+    connected = true;
+  });
+  const r = await runDriver(["--cwd", "/tmp"], {
+    port: server.port,
+    stdin: "x",
+    env: { CODEX_BRIDGE_CONTROL_TIMEOUT_MS: "soon" },
+  });
+  server.close();
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /CODEX_BRIDGE_CONTROL_TIMEOUT_MS/);
+  assert.equal(connected, false);
+});
+
 test("resume: thread/resume also carries pinned sandbox values", async () => {
   const recorded = [];
   const server = await startMockServer(appServerBehaviour(recorded));
@@ -292,6 +321,25 @@ test("review: review/start carries target verbatim on a danger-pinned thread", a
   assert.deepEqual(review.params.target, target);
   assert.equal(review.params.threadId, "thread-1");
   assert.equal(findRequest(recorded, "turn/start"), undefined);
+});
+
+test("review: a reviewThreadId other than our thread fails closed instead of hanging", async () => {
+  // delivery "inline" runs the review on the thread we started (measured), so every event
+  // arrives on that threadId. A different reviewThreadId would mean events we have no
+  // buffer for; refuse rather than wait forever.
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      turnStartResult: { reviewThreadId: "review-thread", turn: { id: "turn-1" } },
+    }),
+  );
+  const r = await runDriver(
+    ["--cwd", "/tmp", "--review-target", JSON.stringify({ type: "uncommittedChanges" })],
+    { port: server.port },
+  );
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /review-thread/);
 });
 
 test("thread/start tells codex it is inside the Claude sandbox", async () => {

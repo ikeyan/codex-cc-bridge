@@ -1,7 +1,7 @@
 ---
 description: Run a Codex code review (native review/start) against local git state
 argument-hint: '[--base <branch>] [--commit <sha>] [--instructions <text>] [--model <m>] (default: uncommitted changes)'
-allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(curl:*), Bash(codex:*), Bash(git:*)
+allowed-tools: Read, Write, Glob, Grep, Bash(node:*), Bash(codex:*), Bash(git:*)
 ---
 
 Run a Codex review through the resident app-server's native `review/start`. Load the

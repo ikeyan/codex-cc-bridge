@@ -1,7 +1,7 @@
 ---
 description: Delegate a task or question to Codex (one turn on the resident app-server)
 argument-hint: '[--thread <id>] [--model <m>] [--schema <file>] <task description>'
-allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(curl:*), Bash(codex:*), Bash(git:*)
+allowed-tools: Read, Write, Glob, Grep, Bash(node:*), Bash(codex:*), Bash(git:*)
 ---
 
 Delegate one turn to Codex via the codex-bridge skill. Load the `codex-bridge` skill

@@ -40,7 +40,12 @@ thread も turn も作らず、モデルにも渡らず、トークンも消費�
 ## `review/start` には prompt の口が無い
 
 パラメータは `{threadId, target, delivery}` だけ (target は `uncommittedChanges` / `baseBranch` /
-`commit` / `custom`)。レビューは thread 上で走り、`reviewThreadId` が返る。
+`commit` / `custom`)。driver は `delivery: "inline"` 固定で、このときレビューは**呼び出した thread
+の上で走り**、応答の `reviewThreadId` はその threadId と同一、通知もすべてその threadId で届く
+(`detached` は `thread/start` で作った thread には拒否される。canon:
+`facts/codex/review-start-inline-same-thread`)。driver は `reviewThreadId` が自分の thread と
+違えば fail-closed で落とす — 別 thread の通知は
+[[architecture/turn-event-demultiplexing|thread フィルタ]]で捨てられるので、追い掛けても永久に待つだけになる。
 
 **どの調整項目がレビューに効くかは、それが thread の設定か turn の設定かで決まる。**
 

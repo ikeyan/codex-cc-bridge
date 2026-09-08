@@ -35,9 +35,6 @@ const PINNED_THREAD_SANDBOX = "danger-full-access";
 const PINNED_TURN_SANDBOX_POLICY = Object.freeze({ type: "dangerFullAccess" });
 const PINNED_APPROVAL_POLICY = "never";
 const PROBE_TIMEOUT_MS = 15_000;
-// Control-plane RPCs (initialize/thread/turn-start) must answer promptly; only
-// waiting for turn *completion* is unbounded. Env override exists for tests.
-const CONTROL_TIMEOUT_MS = Number(process.env.CODEX_BRIDGE_CONTROL_TIMEOUT_MS ?? 30_000);
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 // --- Protocol types (the small subset of the codex app-server v2 API we use;
@@ -205,6 +202,18 @@ if (!tokenFile) {
 }
 const token = fs.readFileSync(tokenFile, "utf8").trim();
 if (!token) usage(`token file ${tokenFile} is empty`);
+// Control-plane RPCs (initialize/thread/turn-start) must answer promptly; only
+// waiting for turn *completion* is unbounded. Env override exists for tests; a
+// value that is not a positive number would become setTimeout(NaN) = fire at once.
+const controlTimeoutEnv = process.env.CODEX_BRIDGE_CONTROL_TIMEOUT_MS;
+const CONTROL_TIMEOUT_MS = controlTimeoutEnv === undefined || controlTimeoutEnv === ""
+  ? 30_000
+  : Number(controlTimeoutEnv);
+if (!(Number.isFinite(CONTROL_TIMEOUT_MS) && CONTROL_TIMEOUT_MS > 0)) {
+  usage(
+    `CODEX_BRIDGE_CONTROL_TIMEOUT_MS must be a positive number of ms, got ${controlTimeoutEnv}`,
+  );
+}
 
 // --- Telling codex where it is ---------------------------------------------
 // codex has no idea it is inside the Claude Code sandbox: it reads a failed write to
@@ -503,7 +512,15 @@ send({ jsonrpc: "2.0", method: "initialized", params: {} });
       }). Refusing to run a turn.`,
     );
   }
-  const [home, tmp, cwdw] = String(probe.stdout ?? "").trim().split(/\s+/);
+  const fields = String(probe.stdout ?? "").trim().split(/\s+/);
+  // Three known words or nothing: anything else is a broken probe, not a verdict.
+  if (fields.length !== 3 || !fields.every((f) => f === "BLOCKED" || f === "WRITABLE")) {
+    fail(
+      `containment probe output not understood (stdout: ${JSON.stringify(probe.stdout)}, ` +
+        `stderr: ${JSON.stringify(probe.stderr)}). Refusing to run a turn.`,
+    );
+  }
+  const [home, tmp, cwdw] = fields;
   if (home !== "BLOCKED" || tmp !== "BLOCKED") {
     fail(
       `REFUSING TO RUN: the app-server at ${url} can write ${
@@ -566,8 +583,17 @@ if (reviewTarget) {
     delivery: "inline",
   }).catch((e: Error) => fail(String(e.message ?? e)));
   if (!r.turn?.id) fail("app-server returned no turn id for review/start");
+  // With delivery "inline" the review runs on the thread we started, and every event
+  // arrives on that threadId (measured; "detached" is rejected for thread/start threads).
+  // Events for any other thread are filtered out before the early-event buffer sees them,
+  // so a different reviewThreadId could only be waited on forever: refuse instead.
+  if (r.reviewThreadId !== undefined && r.reviewThreadId !== threadId) {
+    fail(
+      `review/start moved the review to thread ${r.reviewThreadId} (ours is ${threadId}); ` +
+        "this driver only follows inline reviews on its own thread",
+    );
+  }
   activeTurnId = r.turn.id;
-  if (r.reviewThreadId) threadId = r.reviewThreadId;
 } else {
   const params: Record<string, unknown> = {
     threadId,
