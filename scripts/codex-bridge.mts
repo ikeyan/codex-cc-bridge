@@ -7,12 +7,14 @@
 // deterministic, so it lives here instead of as shell one-liners in SKILL.md:
 // prose cannot be tested, and a mistyped regex or mktemp mode fails silently.
 //
-//   codex-bridge.mts init         -> create the 0600 capability-token file, print its path
-//   codex-bridge.mts ready FILE   -> wait until the app-server in the background task whose
-//                                    output is FILE is listening and /readyz answers,
-//                                    then print the port it was assigned
+//   codex-bridge.mts init            -> create a private session dir holding the 0600
+//                                       capability token; print the DIR
+//   codex-bridge.mts ready DIR FILE  -> wait until the app-server in the background task
+//                                       whose output is FILE is listening and /readyz
+//                                       answers, publish the port as DIR/port, print it
 //
-// Between the two, start the server (see `init`'s printed hint).
+// Between the two, start the server (see `init`'s printed hint). The DIR is the one
+// value a session carries: the driver takes `--session DIR` and reads both files.
 
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -21,7 +23,9 @@ import path from "node:path";
 import process from "node:process";
 import { parseArgs } from "node:util";
 
-const READY_TIMEOUT_MS = 30_000;
+// Env override exists for tests (a stalled /readyz must be provable in seconds).
+const READY_TIMEOUT_MS = Number(process.env.CODEX_BRIDGE_READY_TIMEOUT_MS ?? 30_000);
+const READYZ_FETCH_TIMEOUT_MS = 2_000;
 const POLL_INTERVAL_MS = 250;
 // The app-server prints its endpoint once it is bound. Port 0 means the OS picks a
 // free port, so this banner is the only place the actual number appears.
@@ -31,37 +35,65 @@ function usage(message?: string): never {
   if (message) console.error(`codex-bridge: ${message}`);
   console.error(
     "usage: codex-bridge.mts init\n" +
-      "       codex-bridge.mts ready <background-task-output-file>",
+      "       codex-bridge.mts ready <session-dir> <background-task-output-file>",
   );
   process.exit(2);
 }
 
-/** Capability token for `codex app-server --ws-auth capability-token`. */
+function fail(message: string): never {
+  console.error(`codex-bridge: ${message}`);
+  process.exit(1);
+}
+
+/** POSIX single-quoting: the only escaping that survives every shell the hint may be pasted into. */
+const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/** Capability token for `codex app-server --ws-auth capability-token`, in a fresh private dir. */
 function init(): void {
-  // 0700 dir + 0600 file: the token is the only thing standing between a local
-  // process and a resident server that can run commands.
+  // 0700 dir (mkdtemp) + 0600 file: the token is the only thing standing between a
+  // local process and a resident server that can run commands.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bridge-"));
   const tokenFile = path.join(dir, "token");
   fs.writeFileSync(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600 });
-  console.log(tokenFile);
+  console.log(dir);
   console.error(
     "next: start the app-server as a run_in_background Bash task (never with `&`, or\n" +
-      "TaskStop cannot reclaim it), then run `codex-bridge.mts ready <its output file>`:\n" +
-      `  codex app-server --listen "ws://127.0.0.1:0" --ws-auth capability-token --ws-token-file ${tokenFile}`,
+      "TaskStop cannot reclaim it), then run `codex-bridge.mts ready` with its output file:\n" +
+      `  codex app-server --listen "ws://127.0.0.1:0" --ws-auth capability-token --ws-token-file ${
+        shellQuote(tokenFile)
+      }\n` +
+      `  node codex-bridge.mts ready ${shellQuote(dir)} <that task's output file>`,
   );
 }
 
 async function readyz(port: string): Promise<boolean> {
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/readyz`);
+    // Bounded: a server that accepts the TCP connection but never answers must not
+    // pin the poll loop past READY_TIMEOUT_MS.
+    const r = await fetch(`http://127.0.0.1:${port}/readyz`, {
+      signal: AbortSignal.timeout(READYZ_FETCH_TIMEOUT_MS),
+    });
     return r.ok;
   } catch {
     return false;
   }
 }
 
-/** Wait for the server to bind and answer, then print the port it got. */
-async function ready(outputFile: string): Promise<void> {
+/** Wait for the server to bind and answer, then publish and print the port it got. */
+async function ready(dir: string, outputFile: string): Promise<void> {
+  if (!fs.existsSync(path.join(dir, "token"))) {
+    usage(`${dir} is not a session dir (no token file; use the dir printed by init)`);
+  }
+  const portFile = path.join(dir, "port");
+  // One server per dir: rebinding would silently retarget every driver call that
+  // holds this dir. A new server gets a new init.
+  if (fs.existsSync(portFile)) {
+    fail(
+      `${dir} is already bound (port ${
+        fs.readFileSync(portFile, "utf8").trim()
+      }); run init for a new server`,
+    );
+  }
   const deadline = Date.now() + READY_TIMEOUT_MS;
   let port: string | undefined;
   while (Date.now() < deadline) {
@@ -73,26 +105,30 @@ async function ready(outputFile: string): Promise<void> {
       } catch { /* not created yet */ }
       port = LISTENING_RE.exec(text)?.[1];
       if (port === undefined && /^\[exited with code /m.test(text)) {
-        console.error(
-          `codex-bridge: the app-server exited before it started listening. Its output:\n${text.trim()}`,
-        );
-        process.exit(1);
+        fail(`the app-server exited before it started listening. Its output:\n${text.trim()}`);
+      }
+      if (port !== undefined && (Number(port) < 1 || Number(port) > 65535)) {
+        fail(`banner port ${port} is not a TCP port`);
       }
     }
     if (port !== undefined && await readyz(port)) {
+      // Publish only after readiness, atomically: a driver must never read a half-written
+      // or not-yet-ready port.
+      const tmp = `${portFile}.tmp`;
+      fs.writeFileSync(tmp, `${port}\n`, { mode: 0o600 });
+      fs.renameSync(tmp, portFile);
       console.log(port);
       return;
     }
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
-  console.error(
+  fail(
     port === undefined
-      ? `codex-bridge: no "listening on:" line in ${outputFile} after ${
+      ? `no "listening on:" line in ${outputFile} after ${
         READY_TIMEOUT_MS / 1000
       }s (is it the app-server task's output file?)`
-      : `codex-bridge: port ${port} never answered /readyz within ${READY_TIMEOUT_MS / 1000}s`,
+      : `port ${port} never answered /readyz within ${READY_TIMEOUT_MS / 1000}s`,
   );
-  process.exit(1);
 }
 
 const { positionals } = (() => {
@@ -103,13 +139,13 @@ const { positionals } = (() => {
   }
 })();
 
-const [command, arg] = positionals;
+const [command, ...rest] = positionals;
 if (command === "init") {
-  if (arg !== undefined) usage("init takes no arguments");
+  if (rest.length !== 0) usage("init takes no arguments");
   init();
 } else if (command === "ready") {
-  if (arg === undefined) usage("ready needs the background task's output file");
-  await ready(arg);
+  if (rest.length !== 2) usage("ready needs <session-dir> <background-task-output-file>");
+  await ready(rest[0], rest[1]);
 } else {
   usage(command === undefined ? "no command" : `unknown command: ${command}`);
 }

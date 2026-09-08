@@ -46,23 +46,23 @@ Codex を Claude Code から使うための薄い橋。1 セッション 1 常�
 **CC にしかできない 1 手 (background task としての起動) だけ**。
 
 1. `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.mts" init`
-   → stdout に **TOKEN_FILE のパス**。stderr に次に流すコマンドが出る。
-   **このパスはセッション中ずっと使うので覚えておく。**
-2. 1 の stderr が出したコマンドを、そのまま **`run_in_background` の Bash** で実行する:
-   `codex app-server --listen "ws://127.0.0.1:0" --ws-auth capability-token --ws-token-file <TOKEN_FILE>`
+   → stdout に **セッションディレクトリ (DIR)**。stderr に次に流す 2 コマンドが出る。
+   **セッション中に覚える値はこの DIR だけ** (token と port はこの中に置かれる)。
+2. 1 の stderr が出した 1 つ目のコマンドを、そのまま **`run_in_background` の Bash** で実行する:
+   `codex app-server --listen "ws://127.0.0.1:0" --ws-auth capability-token --ws-token-file '<DIR>/token'`
    - **`&` を付けて普通の Bash で起動してはいけない**。task として追跡されず `TaskStop` が効かなくなる。
    - ポートは 0 (OS が空きを選ぶ)。固定ポートは他セッションの server と衝突する。
    - unix socket / `app-server daemon` / `proxy` は sandbox 内で bind できないので使えない。
-3. `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.mts" ready <2 の出力ファイル>`
-   → 起動待ち・ポート抽出・`/readyz` 確認をまとめてやり、stdout に **PORT** を出す。
+3. `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.mts" ready <DIR> <2 の出力ファイル>`
+   → 起動待ち・ポート抽出・`/readyz` 確認をまとめてやり、ポートを `DIR/port` に書いて stdout にも出す。
    失敗すれば理由付きで exit≠0 するので、待ち時間を自分で見積もらない。
-   **PORT も TOKEN_FILE と同じくセッション中ずっと使う。**
-4. 以降の turn には必ず `--port <PORT> --token-file <TOKEN_FILE>` を付ける
-   (driver に既定ポートは無く、未指定なら起動を拒否する)。
+   DIR は 1 回しか bind できない。server を立て直すときは 1 からやり直す。
+4. 以降の turn には必ず `--session <DIR>` を付ける (env `CODEX_BRIDGE_SESSION` でも可。
+   driver に既定は無く、未指定なら起動を拒否する)。
 5. server は 2 の background task として生き続ける。止めたくなったら **`TaskStop`** に
    その task id を渡す。セッションを閉じるときは task がユーザーに見えているので、止めるかどうかは
    ユーザーが決める。
-6. token ファイルは**削除せずセッション中保持し、token の中身は読まない** (扱うのはパスのみ。
+6. DIR は**削除せずセッション中保持し、token の中身は読まない** (扱うのはパスのみ。
    `cat` などで内容をコンテキストに入れない)。理由と却下した代替案は
    `wiki/security/capability-token.md` を参照。
 
@@ -73,11 +73,10 @@ prompt は stdin から渡す。**Write ツールで一時ファイルに書き�
 起きない。turn は原則 run_in_background の Bash で:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --port <PORT> --token-file <TOKEN_FILE> < /path/to/prompt.txt
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> < /path/to/prompt.txt
 ```
 
-(env でも渡せる: `CODEX_BRIDGE_PORT` / `CODEX_BRIDGE_TOKEN_FILE`。どちらも欠けると driver は
-起動を拒否する — 既定ポートは無い。)
+(prompt を渡す口は stdin だけ。`--prompt` のようなフラグは無い。)
 
 - 結果: stdout に JSON `{ threadId, turnStatus, turnError, finalMessage, tokenUsage }`。
 - 進捗: stderr に 1 行 1 イベント (コマンド実行・エージェントメッセージ)。Monitor で追える。
@@ -113,9 +112,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --port <PORT> --token-file <
 
 ## トラブルシュート
 
-- `no endpoint`: `--port` を渡していない。起動レシピ 3 でポートを読む。
-- `cannot reach app-server`: ポートを取り違えているか server が死んでいる。
-  起動した background task の出力を読み直してポートを確認する。生きている server の一覧は
+- `no session` / `cannot read port`: `--session <DIR>` を渡していないか、起動レシピ 3 の `ready` を
+  まだ走らせていない。
+- `cannot reach app-server`: server が死んでいる (`DIR/port` は `ready` が確認した時点の値)。
+  起動した background task の出力を読み直す。生きている server の一覧は
   `lsof -nP -iTCP -sTCP:LISTEN | grep codex` (`ps` は他の sandbox のプロセスを見せない)。
   readyz が落ち続けるなら `codex login status` / `codex doctor` を確認。
 - `rejected the handshake`: readyz は通るのに弾かれる = その server は別セッションのもの

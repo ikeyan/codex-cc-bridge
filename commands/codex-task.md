@@ -29,10 +29,10 @@ Steps:
    heredoc breaks if the text contains its delimiter line:
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --port <PORT> --token-file <TOKEN_FILE> [--thread <id>] [--model <m>] [--schema <file>] < /path/to/prompt.txt
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> [--thread <id>] [--model <m>] [--schema <file>] < /path/to/prompt.txt
    ```
 
-   (`<TOKEN_FILE>` is the capability-token file from the skill's launch recipe.)
+   (`<DIR>` is the session dir printed by `codex-bridge.mts init` in the skill's launch recipe.)
 
 4. **Report**: when the task completes, relay `finalMessage` to the user, and mention the
    `threadId` so the conversation can be continued with `--thread`.

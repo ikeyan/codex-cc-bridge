@@ -7,10 +7,10 @@
 // (type stripping), no build step.
 //
 // SECURITY INVARIANTS (do not weaken; pinned by tests/codex-turn.test.mjs):
-//   - The endpoint must be loopback (ws://127.0.0.1 / localhost / ::1); the
-//     capability token is never sent anywhere else.
-//   - A capability token is REQUIRED (--token-file or CODEX_BRIDGE_TOKEN_FILE);
-//     the driver refuses to talk to an unauthenticated server.
+//   - The endpoint is always ws://127.0.0.1:<port>, port and capability token both
+//     read from the session dir (--session / CODEX_BRIDGE_SESSION) that the launch
+//     helper wrote. No flag takes a host, URL, port or token path, so the token
+//     cannot be sent anywhere but loopback, and there is no unauthenticated mode.
 //   - Before any thread is started, the server's containment is probed via
 //     command/exec: $HOME and /tmp (outside the sandbox-writable subtrees)
 //     must NOT be writable, and the target cwd MUST be writable (server inside
@@ -35,7 +35,6 @@ const PINNED_THREAD_SANDBOX = "danger-full-access";
 const PINNED_TURN_SANDBOX_POLICY = Object.freeze({ type: "dangerFullAccess" });
 const PINNED_APPROVAL_POLICY = "never";
 const PROBE_TIMEOUT_MS = 15_000;
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 // --- Protocol types (the small subset of the codex app-server v2 API we use;
 // authoritative schemas: `codex app-server generate-json-schema`) -----------
@@ -111,12 +110,11 @@ interface CommandExecResponse {
 function usage(message?: string): never {
   if (message) console.error(`codex-turn: ${message}`);
   console.error(
-    "usage: codex-turn.mts --port N --token-file FILE [--cwd DIR] [--thread ID] [--schema FILE]\n" +
-      "                      [--model M] [--effort E] [--url ws://127.0.0.1:N instead of --port]\n" +
-      "                      [--prompt TEXT | prompt on stdin] [--review-target JSON]\n" +
-      "The app-server must already be running inside the Claude sandbox, with auth:\n" +
-      "  codex app-server --listen ws://127.0.0.1:0 --ws-auth capability-token --ws-token-file FILE\n" +
-      "  (port 0 lets the OS pick a free port; the server prints it as `listening on: ws://...`)",
+    "usage: codex-turn.mts --session DIR [--cwd DIR] [--thread ID] [--schema FILE]\n" +
+      "                      [--model M] [--effort E] [--review-target JSON|-] < prompt.txt\n" +
+      "DIR is the session dir from `codex-bridge.mts init` (token) + `ready` (port); it can\n" +
+      "also come from CODEX_BRIDGE_SESSION. The app-server it points at must be running inside\n" +
+      "the Claude sandbox (see the codex-bridge skill's launch recipe).",
   );
   process.exit(2);
 }
@@ -133,11 +131,8 @@ function parseCli(args: string[]) {
         schema: { type: "string" },
         model: { type: "string" },
         effort: { type: "string" },
-        port: { type: "string" },
-        url: { type: "string" },
-        prompt: { type: "string" },
+        session: { type: "string" },
         "review-target": { type: "string" },
-        "token-file": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -149,59 +144,59 @@ function parseCli(args: string[]) {
 
 const opts = parseCli(process.argv.slice(2));
 const cwd: string = opts.cwd ?? process.cwd();
-// No default port on purpose. The launch recipe starts the server on port 0 and reads the
-// port the OS assigned, so there is no well-known port to fall back to — a fixed default
-// would silently aim at whatever stale server happens to hold it.
-const portArg = opts.port ?? process.env.CODEX_BRIDGE_PORT;
-if (!opts.url && !portArg) {
+// The session dir is the only way to name a server: no default port on purpose. The
+// launch recipe starts the server on port 0 and `ready` publishes the port the OS
+// assigned into the dir, so a fixed default would silently aim at whatever stale server
+// happens to hold it. Reading the token from the same dir means there is no argv path
+// that could point the token at a non-loopback host, and no unauthenticated mode.
+const sessionDir = opts.session ?? process.env.CODEX_BRIDGE_SESSION;
+if (!sessionDir) {
   usage(
-    "no endpoint: pass --port N (or set CODEX_BRIDGE_PORT, or --url). The launch recipe in the codex-bridge skill prints the port the app-server was given",
+    "no session: pass --session DIR (or set CODEX_BRIDGE_SESSION) — the dir printed by `codex-bridge.mts init` in the codex-bridge skill's launch recipe",
   );
 }
-const url: string = opts.url ?? `ws://127.0.0.1:${Number(portArg)}`;
-// The capability token must never leave this machine: loopback only.
-let endpoint: URL;
-try {
-  endpoint = new URL(url);
-} catch {
-  usage(`invalid --url: ${url}`);
+function readSessionFile(name: string, missingHint: string): string {
+  try {
+    return fs.readFileSync(path.join(sessionDir!, name), "utf8").trim();
+  } catch (e) {
+    usage(`session ${sessionDir}: cannot read ${name} (${(e as Error).message}). ${missingHint}`);
+  }
 }
-if (endpoint.protocol !== "ws:" || !LOOPBACK_HOSTS.has(endpoint.hostname)) {
+const token = readSessionFile("token", "Is this the dir printed by `codex-bridge.mts init`?");
+if (!token) usage(`session ${sessionDir}: token file is empty`);
+const portText = readSessionFile(
+  "port",
+  "Run `codex-bridge.mts ready DIR <app-server task output file>` first; it publishes the port here.",
+);
+if (!/^[0-9]{1,5}$/.test(portText) || Number(portText) < 1 || Number(portText) > 65535) {
   usage(
-    `refusing non-loopback endpoint ${url} (the capability token and prompts must stay on this machine)`,
+    `session ${sessionDir}: port file must hold a TCP port (1-65535), got ${
+      JSON.stringify(portText)
+    }`,
   );
 }
-const port = endpoint.port || "80";
+const port = Number(portText);
+const url = `ws://127.0.0.1:${port}`;
 const reviewTargetArg = opts["review-target"];
-// review/start itself carries only {threadId, target, delivery}, so a prompt, an
-// outputSchema and a per-turn effort have nowhere to go. `model` is different: it is a
+// review/start itself carries only {threadId, target, delivery}, so an outputSchema and
+// a per-turn effort have nowhere to go (and stdin is the target, not a prompt). `model` is different: it is a
 // thread-level setting, and the review runs on the thread we start, so it does apply.
-if (reviewTargetArg && (opts.prompt !== undefined || opts.schema || opts.effort)) {
+if (reviewTargetArg && (opts.schema || opts.effort)) {
   usage(
-    "--review-target cannot be combined with a prompt, --schema or --effort (review/start has no slot for them; --model is fine, it rides on the thread)",
+    "--review-target cannot be combined with --schema or --effort (review/start has no slot for them; --model is fine, it rides on the thread)",
   );
 }
 // "-" reads the target JSON from stdin, so callers never have to shell-quote it.
 const reviewTarget: unknown = reviewTargetArg
   ? JSON.parse(reviewTargetArg === "-" ? fs.readFileSync(0, "utf8") : reviewTargetArg)
   : null;
-let prompt = opts.prompt;
-if (!reviewTarget && prompt === undefined) prompt = fs.readFileSync(0, "utf8");
-if (!reviewTarget && !prompt!.trim()) usage("empty prompt");
+// The prompt always comes on stdin: callers Write it to a file and redirect, so its
+// text never passes through a shell (see the skill). No --prompt flag on purpose.
+const prompt = reviewTarget ? undefined : fs.readFileSync(0, "utf8");
+if (prompt !== undefined && !prompt.trim()) usage("empty prompt (stdin)");
 const outputSchema: unknown = opts.schema
   ? JSON.parse(fs.readFileSync(opts.schema, "utf8"))
   : undefined;
-// Capability token for a server started with --ws-auth capability-token
-// (works on loopback; measured). REQUIRED: an unauthenticated resident server
-// would be drivable by any local process, so refuse to be part of that setup.
-const tokenFile = opts["token-file"] ?? process.env.CODEX_BRIDGE_TOKEN_FILE;
-if (!tokenFile) {
-  usage(
-    "a capability token is required: pass --token-file or set CODEX_BRIDGE_TOKEN_FILE (see the codex-bridge skill's launch recipe)",
-  );
-}
-const token = fs.readFileSync(tokenFile, "utf8").trim();
-if (!token) usage(`token file ${tokenFile} is empty`);
 // Control-plane RPCs (initialize/thread/turn-start) must answer promptly; only
 // waiting for turn *completion* is unbounded. Env override exists for tests; a
 // value that is not a positive number would become setTimeout(NaN) = fire at once.
@@ -302,9 +297,8 @@ ws.onerror = () => {
   fail(
     `cannot reach app-server at ${url} (not running, or it rejected the handshake).\n` +
       `- If http://127.0.0.1:${port}/readyz succeeds, the server is up but the token does not match\n` +
-      `  (it probably belongs to another session; use a different port).\n` +
-      `- Otherwise start it inside the Claude sandbox first (run_in_background Bash):\n` +
-      `  codex app-server --listen ${url} --ws-auth capability-token --ws-token-file <token-file>`,
+      `  (session ${sessionDir} points at another session's server; run the launch recipe again).\n` +
+      `- Otherwise the server died: start a new one with the launch recipe (fresh init + ready).`,
   );
 };
 ws.onclose = () => {

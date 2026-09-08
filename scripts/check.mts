@@ -42,6 +42,8 @@ const reviewSync = `(f=$(mktemp -p "\${TMPDIR:-/tmp}"); trap 'rm -f "$f"' EXIT; 
 
 const steps: Step[] = [
   { name: "test  driver=node", cmd: ["node", "--test", "tests/codex-turn.test.mjs"] },
+  // The launch helper only ever runs under node (the skill says `node`), so no matrix.
+  { name: "test  launch helper", cmd: ["node", "--test", "tests/codex-bridge.test.mjs"] },
   {
     name: "test  driver=deno",
     cmd: ["node", "--test", "tests/codex-turn.test.mjs"],

@@ -1,5 +1,6 @@
 // Pins the security invariants of scripts/codex-turn.mts against a mock app-server:
-//   - the endpoint must be loopback and a capability token is required
+//   - the endpoint is always ws://127.0.0.1:<port> read from the session dir (--session);
+//     no flag takes a host, URL, port or token path
 //   - a containment probe (command/exec) runs BEFORE any thread is started;
 //     $HOME or /tmp writable, or cwd non-writable, aborts the run
 //   - thread/start & thread/resume always carry sandbox "danger-full-access" + approvalPolicy "never"
@@ -33,9 +34,16 @@ const DRIVER_CMD = (() => {
 const spawnDriver = (args, env) =>
   spawn(DRIVER_CMD[0], [...DRIVER_CMD.slice(1), ...args], { env: { ...process.env, ...env } });
 
-// A token file shared by all tests (the driver refuses to run without one).
-const TOKEN_PATH = join(mkdtempSync(join(tmpdir(), "codex-turn-test-")), "token");
-writeFileSync(TOKEN_PATH, "sekrit-token-123\n", { mode: 0o600 });
+// A session dir is what `codex-bridge.mts init` + `ready` leave behind: token + port.
+// Fresh dir per mock server so tests never share a port file.
+function makeSession(port, { token = "sekrit-token-123\n", portText } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "codex-turn-test-"));
+  writeFileSync(join(dir, "token"), token, { mode: 0o600 });
+  if (port !== undefined || portText !== undefined) {
+    writeFileSync(join(dir, "port"), portText ?? `${port}\n`);
+  }
+  return dir;
+}
 
 // Minimal RFC6455 text-frame server good enough for JSON-RPC lines in tests.
 function startMockServer(onMessage) {
@@ -172,15 +180,13 @@ function appServerBehaviour(
   };
 }
 
-function runDriver(args, { port, stdin, env, noToken } = {}) {
-  const fullArgs = noToken || args.includes("--token-file")
-    ? args
-    : ["--token-file", TOKEN_PATH, ...args];
+function runDriver(args, { port, stdin, env, session } = {}) {
+  // session: explicit dir | undefined (make one for `port`) | null (pass none at all)
+  const dir = session === undefined ? makeSession(port) : session;
+  const fullArgs = dir ? ["--session", dir, ...args] : args;
   return new Promise((resolve) => {
-    const child = spawnDriver(fullArgs, {
-      ...(port ? { CODEX_BRIDGE_PORT: String(port) } : {}),
-      ...env,
-    });
+    // spawnDriver inherits process.env; blank the var a developer may have set.
+    const child = spawnDriver(fullArgs, { CODEX_BRIDGE_SESSION: "", ...env });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -381,6 +387,11 @@ test("unknown flags are rejected before connecting (no sandbox injection path)",
       ["--sandbox", "read-only"],
       ["--sandbox-policy", '{"type":"readOnly"}'],
       ["--approval-policy", "untrusted"],
+      // Retired endpoint/token/prompt flags: the session dir is the only route.
+      ["--port", "1"],
+      ["--token-file", "/dev/null"],
+      ["--url", "ws://127.0.0.1:1"],
+      ["--prompt", "hi"],
     ]
   ) {
     const r = await runDriver(args, { port: server.port, stdin: "x" });
@@ -391,32 +402,59 @@ test("unknown flags are rejected before connecting (no sandbox injection path)",
   assert.equal(connected, false);
 });
 
-test("missing capability token is rejected before connecting", async () => {
+test("no session is rejected before connecting (there is no default endpoint)", async () => {
   let connected = false;
   const server = await startMockServer(() => {
     connected = true;
   });
-  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x", noToken: true });
+  const r = await runDriver(["--cwd", "/tmp"], { stdin: "x", session: null });
   server.close();
   assert.equal(r.code, 2);
-  assert.match(r.stderr, /token is required/);
+  assert.match(r.stderr, /no session/);
   assert.equal(connected, false);
 });
 
-test("no endpoint is rejected before connecting (there is no default port)", async () => {
-  // spawnDriver inherits process.env, so blank the var a developer may have set.
-  const r = await runDriver(["--cwd", "/tmp"], { stdin: "x", env: { CODEX_BRIDGE_PORT: "" } });
+test("session without a port file (ready not run) is rejected with a hint", async () => {
+  const dir = makeSession(undefined);
+  const r = await runDriver(["--cwd", "/tmp"], { stdin: "x", session: dir });
   assert.equal(r.code, 2);
-  assert.match(r.stderr, /no endpoint/);
+  assert.match(r.stderr, /ready/);
 });
 
-test("non-loopback endpoints are rejected before connecting", async () => {
-  const r = await runDriver(["--cwd", "/tmp", "--url", "ws://192.168.1.10:41100"], { stdin: "x" });
+test("malformed port files are rejected before connecting", async () => {
+  for (const portText of ["", "abc", "0", "65536", "80 extra", "ws://127.0.0.1:41100"]) {
+    const dir = makeSession(undefined, { portText });
+    const r = await runDriver(["--cwd", "/tmp"], { stdin: "x", session: dir });
+    assert.equal(r.code, 2, JSON.stringify(portText));
+    assert.match(r.stderr, /port/, JSON.stringify(portText));
+  }
+});
+
+test("empty token file is rejected before connecting", async () => {
+  let connected = false;
+  const server = await startMockServer(() => {
+    connected = true;
+  });
+  const dir = makeSession(server.port, { token: "\n" });
+  const r = await runDriver(["--cwd", "/tmp"], { stdin: "x", session: dir });
+  server.close();
   assert.equal(r.code, 2);
-  assert.match(r.stderr, /non-loopback/);
-  const r2 = await runDriver(["--cwd", "/tmp", "--url", "wss://example.com/"], { stdin: "x" });
-  assert.equal(r2.code, 2);
-  assert.match(r2.stderr, /non-loopback/);
+  assert.match(r.stderr, /token/);
+  assert.equal(connected, false);
+});
+
+test("CODEX_BRIDGE_SESSION env is an alternative to --session", async () => {
+  const recorded = [];
+  const server = await startMockServer(appServerBehaviour(recorded));
+  const dir = makeSession(server.port);
+  const r = await runDriver(["--cwd", "/tmp"], {
+    stdin: "hi",
+    session: null,
+    env: { CODEX_BRIDGE_SESSION: dir },
+  });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(server.authHeaders, ["Bearer sekrit-token-123"]);
 });
 
 test("review tuning flags that cannot be applied are rejected", async () => {
@@ -632,9 +670,7 @@ test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
     }),
   );
   const result = new Promise((resolve) => {
-    child = spawnDriver(["--token-file", TOKEN_PATH, "--cwd", "/tmp"], {
-      CODEX_BRIDGE_PORT: String(server.port),
-    });
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d));
     child.on("close", (code) => resolve({ code, stderr }));
@@ -676,9 +712,7 @@ test("SIGTERM racing the turn/start response still interrupts the turn", async (
     }
   });
   const result = new Promise((resolve) => {
-    child = spawnDriver(["--token-file", TOKEN_PATH, "--cwd", "/tmp"], {
-      CODEX_BRIDGE_PORT: String(server.port),
-    });
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d));
     child.on("close", (code) => resolve({ code, stderr }));
@@ -717,7 +751,7 @@ test("stalled control-plane RPCs time out instead of hanging", async () => {
   assert.match(r.stderr, /no response after/);
 });
 
-test("--token-file attaches Authorization: Bearer to the handshake", async () => {
+test("the session token is attached as Authorization: Bearer on the handshake", async () => {
   const recorded = [];
   const server = await startMockServer(appServerBehaviour(recorded));
   const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });

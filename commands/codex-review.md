@@ -36,10 +36,10 @@ Steps:
    shell (no expansion, no heredoc-delimiter collisions):
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --port <PORT> --token-file <TOKEN_FILE> --review-target - < /path/to/target.json
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> --review-target - < /path/to/target.json
    ```
 
-   (`<TOKEN_FILE>` is the capability-token file from the skill's launch recipe.)
+   (`<DIR>` is the session dir printed by `codex-bridge.mts init` in the skill's launch recipe.)
 
 5. **Report**: relay `finalMessage` (the review findings) to the user unchanged, plus the
    `threadId` for follow-up questions via `/codex-task --thread <id>`.
