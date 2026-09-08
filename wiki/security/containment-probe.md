@@ -29,10 +29,11 @@ server 自身に 3 箇所への書込を試させ、結果で続行可否を決�
 - **なぜ `/tmp` 直下か**: Claude sandbox は `/tmp` 直下への書込は拒否する一方、
   `/tmp/claude*` のような指定サブツリーには書かせる。だから「sandbox の中か」を判定する
   プローブは、許可されたサブツリーではなく**直下**を突く必要がある。
-- **`/tmp` 直下 BLOCKED は macOS (Seatbelt) での実測に立っている**: Linux の Claude sandbox
-  (bubblewrap) で `/tmp` 直下がどう扱われるかは未測。もし書けるなら、正しく sandbox 内にいる server も
-  「NOT confined」で拒否される (fail-closed 側に倒れるので実害は起動不能に留まる)。Linux で使うときは
-  先に測って canon に置き、必要ならこの判定を見直す。
+- **`/tmp` 直下 BLOCKED は macOS (Seatbelt) と Linux (bubblewrap) の両方で実測済み**: どちらも
+  `$HOME` と `/tmp` 直下は書けず、`$TMPDIR` (`/tmp/claude-<uid>` 配下) と cwd だけ書ける。
+  canon: `facts/codex/claude-sandbox-integration` (macOS)、
+  `facts/claude-code/linux-sandbox-tmp-blocked-like-macos` (Linux。非 root + socat が前提)。
+  Linux 側で app-server を含む一式が通ることは未測。
 - **なぜ `sandboxPolicy` を明示するか**: 省くとユーザー設定の codex sandbox が `command/exec` に
   適用され、Claude sandbox 内では入れ子 Seatbelt で exit 71 になる。プローブ自体が理由もなく
   「失敗」してしまうため、turn と同じ policy を明示的に渡す。
