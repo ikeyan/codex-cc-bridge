@@ -111,7 +111,11 @@ function usage(message?: string): never {
   if (message) console.error(`codex-turn: ${message}`);
   console.error(
     "usage: codex-turn.mts --session DIR [--cwd DIR] [--thread ID] [--schema FILE]\n" +
-      "                      [--model M] [--effort E] [--review-target JSON|-] < prompt.txt\n" +
+      "                      [--model M] [--effort E] < prompt.txt\n" +
+      "       codex-turn.mts --session DIR --review uncommitted|base|commit|custom\n" +
+      "                      [--target-file FILE] [--cwd DIR] [--thread ID] [--model M]\n" +
+      "  base/commit take the branch name / sha from FILE (plain text, one line);\n" +
+      "  custom takes its instructions on stdin. Neither ever passes through a shell.\n" +
       "DIR is the session dir from `codex-bridge.mts init` (token) + `ready` (port); it can\n" +
       "also come from CODEX_BRIDGE_SESSION. The app-server it points at must be running inside\n" +
       "the Claude sandbox (see the codex-bridge skill's launch recipe).",
@@ -132,7 +136,8 @@ function parseCli(args: string[]) {
         model: { type: "string" },
         effort: { type: "string" },
         session: { type: "string" },
-        "review-target": { type: "string" },
+        review: { type: "string" },
+        "target-file": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -177,22 +182,65 @@ if (!/^[0-9]{1,5}$/.test(portText) || Number(portText) < 1 || Number(portText) >
 }
 const port = Number(portText);
 const url = `ws://127.0.0.1:${port}`;
-const reviewTargetArg = opts["review-target"];
+// --- Review target ------------------------------------------------------------
+// The mode is a flag; the value (branch name, sha, instructions) never is. Branch names
+// may legally contain `$(...)` or a single quote (measured), so no quoting discipline in
+// the agent's command line is safe; a file written by the Write tool, or stdin, is.
+const REVIEW_MODES = ["uncommitted", "base", "commit", "custom"] as const;
+type ReviewMode = typeof REVIEW_MODES[number];
+const reviewMode = opts.review as ReviewMode | undefined;
+if (reviewMode !== undefined && !REVIEW_MODES.includes(reviewMode)) {
+  usage(`--review must be one of ${REVIEW_MODES.join("|")}, got ${JSON.stringify(reviewMode)}`);
+}
 // review/start itself carries only {threadId, target, delivery}, so an outputSchema and
-// a per-turn effort have nowhere to go (and stdin is the target, not a prompt). `model` is different: it is a
-// thread-level setting, and the review runs on the thread we start, so it does apply.
-if (reviewTargetArg && (opts.schema || opts.effort)) {
+// a per-turn effort have nowhere to go (and stdin is the target, not a prompt).
+// `model` is different: it is a thread-level setting, and the review runs on the thread
+// we start, so it does apply.
+if (reviewMode !== undefined && (opts.schema || opts.effort)) {
   usage(
-    "--review-target cannot be combined with --schema or --effort (review/start has no slot for them; --model is fine, it rides on the thread)",
+    "--review cannot be combined with --schema or --effort (review/start has no slot for them; --model is fine, it rides on the thread)",
   );
 }
-// "-" reads the target JSON from stdin, so callers never have to shell-quote it.
-const reviewTarget: unknown = reviewTargetArg
-  ? JSON.parse(reviewTargetArg === "-" ? fs.readFileSync(0, "utf8") : reviewTargetArg)
-  : null;
+const needsTargetFile = reviewMode === "base" || reviewMode === "commit";
+if (needsTargetFile && !opts["target-file"]) {
+  usage(
+    `--review ${reviewMode} needs --target-file FILE holding the ${
+      reviewMode === "base" ? "branch name" : "commit sha"
+    }`,
+  );
+}
+if (!needsTargetFile && opts["target-file"]) {
+  usage(
+    `--target-file only applies to --review base|commit (got --review ${reviewMode ?? "<none>"})`,
+  );
+}
+/** One non-empty line of plain text from FILE (trailing newline tolerated). */
+function readTargetLine(file: string, what: string): string {
+  const text = fs.readFileSync(file, "utf8");
+  const line = text.trim();
+  if (!line || line.includes("\n")) {
+    usage(`${file} must hold exactly one non-empty line (the ${what})`);
+  }
+  return line;
+}
+const stdinText = (): string => fs.readFileSync(0, "utf8");
+let reviewTarget: Record<string, string> | null = null;
+if (reviewMode === "uncommitted") reviewTarget = { type: "uncommittedChanges" };
+else if (reviewMode === "base") {
+  reviewTarget = {
+    type: "baseBranch",
+    branch: readTargetLine(opts["target-file"]!, "branch name"),
+  };
+} else if (reviewMode === "commit") {
+  reviewTarget = { type: "commit", sha: readTargetLine(opts["target-file"]!, "commit sha") };
+} else if (reviewMode === "custom") {
+  const instructions = stdinText();
+  if (!instructions.trim()) usage("--review custom: empty instructions (stdin)");
+  reviewTarget = { type: "custom", instructions };
+}
 // The prompt always comes on stdin: callers Write it to a file and redirect, so its
 // text never passes through a shell (see the skill). No --prompt flag on purpose.
-const prompt = reviewTarget ? undefined : fs.readFileSync(0, "utf8");
+const prompt = reviewTarget ? undefined : stdinText();
 if (prompt !== undefined && !prompt.trim()) usage("empty prompt (stdin)");
 const outputSchema: unknown = opts.schema
   ? JSON.parse(fs.readFileSync(opts.schema, "utf8"))

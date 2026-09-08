@@ -84,10 +84,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> < /path/to/p
   server 側の turn も止まる (放置トークン消費なし)。
 - マルチターン: 結果の `threadId` を `--thread <id>` に渡すと文脈込みで継続する。
 - 構造化出力: `--schema <file.json>` (JSON Schema) で最終メッセージを constrained にできる。
-- ネイティブレビュー: `--review-target -` で target JSON を stdin (Write したファイルの
-  リダイレクト) から渡す。target は `{"type":"uncommittedChanges"}` /
-  `{"type":"baseBranch","branch":"main"}` / `{"type":"commit","sha":"..."}` /
-  `{"type":"custom","instructions":"..."}`。
+- ネイティブレビュー: `--review uncommitted|base|commit|custom`。モードだけがフラグで、
+  値はシェルを通さない — `base` / `commit` はブランチ名 / sha を **Write した 1 行のファイル**から
+  `--target-file FILE` で、`custom` は指示文を **stdin** から読む (`uncommitted` は入力なし)。
+  ブランチ名は `$(...)` や `'` を含みうるので、引数に直書きする形は driver に無い。
 - モデル: `--model M` (任意)。thread レベルの設定なので**レビューにも効く**。
   指定した名前が実在するかは app-server が検証せずそのまま返すので、
   進捗の `{"event":"thread",...}` に出る `model` は「受け付けられた」ことの証明でしかない。

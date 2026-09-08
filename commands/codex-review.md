@@ -17,11 +17,11 @@ Steps:
 
 1. **Server**: if this session has no running app-server yet, follow the skill's launch recipe
    (起動レシピ) exactly as written there; do not improvise the steps here.
-2. **Pick the review target** from the arguments:
-   - `--base <branch>` → `{"type":"baseBranch","branch":"<branch>"}`
-   - `--commit <sha>` → `{"type":"commit","sha":"<sha>"}`
-   - `--instructions <text>` → `{"type":"custom","instructions":"<text>"}`
-   - none of the above → `{"type":"uncommittedChanges"}`
+2. **Pick the review mode** from the arguments:
+   - `--base <branch>` → `--review base --target-file FILE`, FILE holding the branch name
+   - `--commit <sha>` → `--review commit --target-file FILE`, FILE holding the sha
+   - `--instructions <text>` → `--review custom < FILE`, FILE holding the text
+   - none of the above → `--review uncommitted` (no file, no stdin)
    `--model <m>` may also be passed through: it is a thread-level setting, so it applies to
    the review. `--effort` is turn-level and cannot be used with a review.
 3. **Do not present an egress scope.** Codex reads files and runs commands on its own, so
@@ -31,12 +31,14 @@ Steps:
    which is false. If the working tree holds secrets, the answer is to fix the sandbox read
    configuration or not to run Codex here, not to narrow the target.
 4. **Run the review as a background task** (reviews regularly take >10 minutes). Write the
-   target JSON to a temp file with the Write tool and feed it via stdin redirection
-   (`--review-target -`) so branch names, shas, or instructions never pass through the
-   shell (no expansion, no heredoc-delimiter collisions):
+   branch name / sha / instructions to a temp file with the Write tool — never put the value
+   on the command line: a branch name may contain `$(...)` or a quote, and no quoting
+   discipline survives that. The driver has no flag that takes the value directly.
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> --review-target - < /path/to/target.json
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> --review base --target-file /path/to/branch.txt
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> --review custom < /path/to/instructions.txt
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> --review uncommitted
    ```
 
    (`<DIR>` is the session dir printed by `codex-bridge.mts init` in the skill's launch recipe.)

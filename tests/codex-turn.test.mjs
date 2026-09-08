@@ -315,16 +315,14 @@ test("resume: thread/resume also carries pinned sandbox values", async () => {
 test("review: review/start carries target verbatim on a danger-pinned thread", async () => {
   const recorded = [];
   const server = await startMockServer(appServerBehaviour(recorded));
-  const target = { type: "baseBranch", branch: "main" };
-  const r = await runDriver(["--cwd", "/tmp", "--review-target", JSON.stringify(target)], {
-    port: server.port,
-  });
+  const r = await runDriver(["--cwd", "/tmp", "--review", "uncommitted"], { port: server.port });
   server.close();
   assert.equal(r.code, 0, r.stderr);
 
   assert.equal(findRequest(recorded, "thread/start").params.sandbox, "danger-full-access");
   const review = findRequest(recorded, "review/start");
-  assert.deepEqual(review.params.target, target);
+  assert.deepEqual(review.params.target, { type: "uncommittedChanges" });
+  assert.equal(review.params.delivery, "inline");
   assert.equal(review.params.threadId, "thread-1");
   assert.equal(findRequest(recorded, "turn/start"), undefined);
 });
@@ -340,7 +338,7 @@ test("review: a reviewThreadId other than our thread fails closed instead of han
     }),
   );
   const r = await runDriver(
-    ["--cwd", "/tmp", "--review-target", JSON.stringify({ type: "uncommittedChanges" })],
+    ["--cwd", "/tmp", "--review", "uncommitted"],
     { port: server.port },
   );
   server.close();
@@ -462,18 +460,11 @@ test("review tuning flags that cannot be applied are rejected", async () => {
   const server = await startMockServer(() => {
     connected = true;
   });
-  const target = JSON.stringify({ type: "uncommittedChanges" });
-  // review/start carries only {threadId, target, delivery}: a prompt, an outputSchema and a
-  // per-turn effort have nowhere to go. --model is NOT here; it is thread-level (below).
-  for (
-    const extra of [
-      ["--effort", "high"],
-      ["--schema", "/dev/null"],
-      ["--prompt", "hi"],
-    ]
-  ) {
-    const r = await runDriver(["--review-target", target, ...extra], { port: server.port });
-    assert.equal(r.code, 2, `expected rejection for --review-target with ${extra[0]}`);
+  // review/start carries only {threadId, target, delivery}: an outputSchema and a per-turn
+  // effort have nowhere to go. --model is NOT here; it is thread-level (below).
+  for (const extra of [["--effort", "high"], ["--schema", "/dev/null"]]) {
+    const r = await runDriver(["--review", "uncommitted", ...extra], { port: server.port });
+    assert.equal(r.code, 2, `expected rejection for --review with ${extra[0]}`);
   }
   server.close();
   assert.equal(connected, false);
@@ -487,8 +478,8 @@ test("review: --model rides on thread/start (review/start has no model slot)", a
     "/tmp",
     "--model",
     "gpt-5.4-mini",
-    "--review-target",
-    JSON.stringify({ type: "uncommittedChanges" }),
+    "--review",
+    "uncommitted",
   ], { port: server.port });
   server.close();
   assert.equal(r.code, 0, r.stderr);
@@ -612,17 +603,73 @@ test("completions arriving before our turn is identified are ignored", async () 
   assert.ok(findRequest(recorded, "turn/start"));
 });
 
-test("--review-target - reads the target JSON from stdin unexpanded", async () => {
+test("review: base/commit take their value from --target-file verbatim (no shell)", async () => {
+  // A branch name git accepts but no shell quoting discipline survives.
+  const branch = "topic/$(id)/it's";
+  const cases = [
+    ["base", `${branch}\n`, { type: "baseBranch", branch }],
+    ["commit", "  0123abcd\n\n", { type: "commit", sha: "0123abcd" }],
+  ];
+  for (const [mode, fileText, expected] of cases) {
+    const recorded = [];
+    const server = await startMockServer(appServerBehaviour(recorded));
+    const file = join(mkdtempSync(join(tmpdir(), "codex-turn-target-")), "target.txt");
+    writeFileSync(file, fileText);
+    const r = await runDriver(["--cwd", "/tmp", "--review", mode, "--target-file", file], {
+      port: server.port,
+    });
+    server.close();
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(findRequest(recorded, "review/start").params.target, expected);
+  }
+});
+
+test("review: custom takes its instructions from stdin unexpanded", async () => {
   const recorded = [];
   const server = await startMockServer(appServerBehaviour(recorded));
-  const target = { type: "custom", instructions: "check `$(rm -rf)` handling, don't expand" };
-  const r = await runDriver(["--cwd", "/tmp", "--review-target", "-"], {
+  const instructions = "check `$(rm -rf)` handling, don't expand\n";
+  const r = await runDriver(["--cwd", "/tmp", "--review", "custom"], {
     port: server.port,
-    stdin: JSON.stringify(target),
+    stdin: instructions,
   });
   server.close();
   assert.equal(r.code, 0, r.stderr);
-  assert.deepEqual(findRequest(recorded, "review/start").params.target, target);
+  assert.deepEqual(findRequest(recorded, "review/start").params.target, {
+    type: "custom",
+    instructions,
+  });
+});
+
+test("review: mode/target-file mismatches and bad files are rejected before connecting", async () => {
+  let connected = false;
+  const server = await startMockServer(() => {
+    connected = true;
+  });
+  const dir = mkdtempSync(join(tmpdir(), "codex-turn-target-"));
+  const empty = join(dir, "empty.txt");
+  writeFileSync(empty, "\n");
+  const twoLines = join(dir, "two.txt");
+  writeFileSync(twoLines, "main\nrelease\n");
+  const ok = join(dir, "ok.txt");
+  writeFileSync(ok, "main\n");
+  const cases = [
+    [["--review", "nonsense"], /must be one of/],
+    [["--review", "base"], /needs --target-file/],
+    [["--review", "commit"], /needs --target-file/],
+    [["--review", "uncommitted", "--target-file", ok], /only applies/],
+    [["--review", "custom", "--target-file", ok], /only applies/],
+    [["--target-file", ok], /only applies/],
+    [["--review", "base", "--target-file", empty], /one non-empty line/],
+    [["--review", "base", "--target-file", twoLines], /one non-empty line/],
+    [["--review", "custom"], /empty instructions/],
+  ];
+  for (const [args, re] of cases) {
+    const r = await runDriver(["--cwd", "/tmp", ...args], { port: server.port, stdin: "" });
+    assert.equal(r.code, 2, args.join(" "));
+    assert.match(r.stderr, re, args.join(" "));
+  }
+  server.close();
+  assert.equal(connected, false);
 });
 
 test("latest agent message wins when no final_answer phase is present", async () => {
