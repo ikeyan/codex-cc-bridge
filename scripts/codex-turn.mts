@@ -592,7 +592,20 @@ if (threadId) {
     approvalPolicy: PINNED_APPROVAL_POLICY,
     developerInstructions: DEVELOPER_INSTRUCTIONS,
     ...(opts.model ? { model: opts.model } : {}),
-  }).catch((e: Error) => fail(String(e.message ?? e)));
+  }).catch((e: Error) => {
+    // Another client holds the thread open: measured cause is the ChatGPT app's remote
+    // control resuming bridge threads on its own app-server (canon:
+    // facts/codex/thread-resume-blocked-by-other-writer-client). Nothing here can
+    // release it; say so instead of leaving a bare -32600.
+    if (String(e.message).includes("already has an active writer")) {
+      fail(
+        `thread ${threadId} is held open by another codex client (typically the ChatGPT app's ` +
+          "remote control, which can resume non-ephemeral threads). Close it there, or drop " +
+          `--thread and start a new thread.\n(${e.message})`,
+      );
+    }
+    fail(String(e.message ?? e));
+  });
   threadId = r.thread?.id ?? threadId;
   resolved = r;
 } else {

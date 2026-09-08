@@ -122,6 +122,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> < /path/to/p
   readyz が落ち続けるなら `codex login status` / `codex doctor` を確認。
 - `rejected the handshake`: readyz は通るのに弾かれる = その server は別セッションのもの
   (token が違う)。自分のポートを取り違えている。
+- `--thread` が `already has an active writer` で落ちる: 別の codex クライアント (典型的には
+  ChatGPT アプリの remote control。bridge の thread は非 ephemeral なのでそこから見える) がその
+  thread を resume して握っている。こちらからは解除できないので、`--thread` を外して新しい thread で
+  続ける。server の不正終了は原因ではない (canon: `facts/codex/thread-resume-blocked-by-other-writer-client`)。
 - 起動直後の `failed to refresh available models` ERROR は非致命 (allowlist 外の副次ホスト)。
 - `sandbox_apply: Operation not permitted` が turn 内で出る場合、danger 固定が崩れている。
   driver の改変を疑い、即中断してユーザーに報告する。

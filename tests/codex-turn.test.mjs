@@ -296,6 +296,30 @@ test("a non-numeric control timeout override is rejected, not turned into NaN", 
   assert.equal(connected, false);
 });
 
+test("resume: a thread held by another client fails with an actionable hint", async () => {
+  const recorded = [];
+  const server = await startMockServer((msg, send) => {
+    if (msg.method) recorded.push(msg);
+    if (msg.id === undefined) return;
+    if (msg.method === "thread/resume") {
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        error: { code: -32600, message: "thread thread-7 already has an active writer" },
+      });
+    } else appServerBehaviour(recorded)(msg, send);
+  });
+  const r = await runDriver(["--cwd", "/tmp", "--thread", "thread-7"], {
+    port: server.port,
+    stdin: "again",
+  });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /another codex client/);
+  assert.match(r.stderr, /start a new thread/);
+  assert.equal(findRequest(recorded, "turn/start"), undefined);
+});
+
 test("resume: thread/resume also carries pinned sandbox values", async () => {
   const recorded = [];
   const server = await startMockServer(appServerBehaviour(recorded));
