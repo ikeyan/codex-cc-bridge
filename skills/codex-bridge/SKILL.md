@@ -39,6 +39,9 @@ Codex を Claude Code から使うための薄い橋。1 セッション 1 常�
 - `sandbox.filesystem.allowWrite`: `["~/.codex"]`
 - `sandbox.network.allowedDomains`: `["api.openai.com","auth.openai.com","chatgpt.com","*.chatgpt.com"]`
 - 認証確認: `codex login status` (未ログインなら ユーザーに `! codex login` を案内)。
+- Linux では加えて `socat` が要り、`claude` は非 root ユーザーで動かす (root だと bwrap が
+  `uid_map` で落ちる)。挙動は macOS と同じ形で実測済み
+  (canon: `facts/claude-code/linux-sandbox-tmp-blocked-like-macos`)。
 
 ## 起動レシピ (セッションで最初に 1 回)
 
