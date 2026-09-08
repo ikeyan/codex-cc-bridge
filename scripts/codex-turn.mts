@@ -24,16 +24,16 @@
 // Rationale: inside the Claude sandbox, read-only/workspace-write die on nested
 // Seatbelt (`sandbox_apply: Operation not permitted`), and danger-full-access is
 // the only mode whose side effects stay ⊆ the Claude sandbox. Never combine with
-// dangerouslyDisableSandbox. See docs/spec.md and ikeyan/canon facts/codex/.
+// dangerouslyDisableSandbox. See wiki/security/ and ikeyan/canon facts/codex/.
 
 import fs from "node:fs";
+import path from "node:path";
 import process from "node:process";
 import { parseArgs } from "node:util";
 
 const PINNED_THREAD_SANDBOX = "danger-full-access";
 const PINNED_TURN_SANDBOX_POLICY = Object.freeze({ type: "dangerFullAccess" });
 const PINNED_APPROVAL_POLICY = "never";
-const DEFAULT_PORT = 41100;
 const PROBE_TIMEOUT_MS = 15_000;
 // Control-plane RPCs (initialize/thread/turn-start) must answer promptly; only
 // waiting for turn *completion* is unbounded. Env override exists for tests.
@@ -89,6 +89,9 @@ interface TurnCompletedParams {
 
 interface ThreadResponse {
   thread?: { id?: string };
+  /** Model the server actually resolved for the thread (echoes `model` when we send one). */
+  model?: string;
+  reasoningEffort?: string | null;
 }
 
 interface TurnStartResponse {
@@ -111,11 +114,12 @@ interface CommandExecResponse {
 function usage(message?: string): never {
   if (message) console.error(`codex-turn: ${message}`);
   console.error(
-    "usage: codex-turn.mts --token-file FILE [--cwd DIR] [--thread ID] [--schema FILE]\n" +
-      "                      [--model M] [--effort E] [--port N | --url ws://127.0.0.1:N]\n" +
+    "usage: codex-turn.mts --port N --token-file FILE [--cwd DIR] [--thread ID] [--schema FILE]\n" +
+      "                      [--model M] [--effort E] [--url ws://127.0.0.1:N instead of --port]\n" +
       "                      [--prompt TEXT | prompt on stdin] [--review-target JSON]\n" +
       "The app-server must already be running inside the Claude sandbox, with auth:\n" +
-      "  codex app-server --listen ws://127.0.0.1:PORT --ws-auth capability-token --ws-token-file FILE",
+      "  codex app-server --listen ws://127.0.0.1:0 --ws-auth capability-token --ws-token-file FILE\n" +
+      "  (port 0 lets the OS pick a free port; the server prints it as `listening on: ws://...`)",
   );
   process.exit(2);
 }
@@ -148,7 +152,16 @@ function parseCli(args: string[]) {
 
 const opts = parseCli(process.argv.slice(2));
 const cwd: string = opts.cwd ?? process.cwd();
-const url: string = opts.url ?? `ws://127.0.0.1:${Number(opts.port ?? process.env.CODEX_BRIDGE_PORT ?? DEFAULT_PORT)}`;
+// No default port on purpose. The launch recipe starts the server on port 0 and reads the
+// port the OS assigned, so there is no well-known port to fall back to — a fixed default
+// would silently aim at whatever stale server happens to hold it.
+const portArg = opts.port ?? process.env.CODEX_BRIDGE_PORT;
+if (!opts.url && !portArg) {
+  usage(
+    "no endpoint: pass --port N (or set CODEX_BRIDGE_PORT, or --url). The launch recipe in the codex-bridge skill prints the port the app-server was given",
+  );
+}
+const url: string = opts.url ?? `ws://127.0.0.1:${Number(portArg)}`;
 // The capability token must never leave this machine: loopback only.
 let endpoint: URL;
 try {
@@ -157,12 +170,19 @@ try {
   usage(`invalid --url: ${url}`);
 }
 if (endpoint.protocol !== "ws:" || !LOOPBACK_HOSTS.has(endpoint.hostname)) {
-  usage(`refusing non-loopback endpoint ${url} (the capability token and prompts must stay on this machine)`);
+  usage(
+    `refusing non-loopback endpoint ${url} (the capability token and prompts must stay on this machine)`,
+  );
 }
 const port = endpoint.port || "80";
 const reviewTargetArg = opts["review-target"];
-if (reviewTargetArg && (opts.prompt !== undefined || opts.schema || opts.model || opts.effort)) {
-  usage("--review-target cannot be combined with a prompt, --schema, --model or --effort (review/start has no slot for them)");
+// review/start itself carries only {threadId, target, delivery}, so a prompt, an
+// outputSchema and a per-turn effort have nowhere to go. `model` is different: it is a
+// thread-level setting, and the review runs on the thread we start, so it does apply.
+if (reviewTargetArg && (opts.prompt !== undefined || opts.schema || opts.effort)) {
+  usage(
+    "--review-target cannot be combined with a prompt, --schema or --effort (review/start has no slot for them; --model is fine, it rides on the thread)",
+  );
 }
 // "-" reads the target JSON from stdin, so callers never have to shell-quote it.
 const reviewTarget: unknown = reviewTargetArg
@@ -171,16 +191,69 @@ const reviewTarget: unknown = reviewTargetArg
 let prompt = opts.prompt;
 if (!reviewTarget && prompt === undefined) prompt = fs.readFileSync(0, "utf8");
 if (!reviewTarget && !prompt!.trim()) usage("empty prompt");
-const outputSchema: unknown = opts.schema ? JSON.parse(fs.readFileSync(opts.schema, "utf8")) : undefined;
+const outputSchema: unknown = opts.schema
+  ? JSON.parse(fs.readFileSync(opts.schema, "utf8"))
+  : undefined;
 // Capability token for a server started with --ws-auth capability-token
 // (works on loopback; measured). REQUIRED: an unauthenticated resident server
 // would be drivable by any local process, so refuse to be part of that setup.
 const tokenFile = opts["token-file"] ?? process.env.CODEX_BRIDGE_TOKEN_FILE;
 if (!tokenFile) {
-  usage("a capability token is required: pass --token-file or set CODEX_BRIDGE_TOKEN_FILE (see the codex-bridge skill's launch recipe)");
+  usage(
+    "a capability token is required: pass --token-file or set CODEX_BRIDGE_TOKEN_FILE (see the codex-bridge skill's launch recipe)",
+  );
 }
 const token = fs.readFileSync(tokenFile, "utf8").trim();
 if (!token) usage(`token file ${tokenFile} is empty`);
+
+// --- Telling codex where it is ---------------------------------------------
+// codex has no idea it is inside the Claude Code sandbox: it reads a failed write to
+// /tmp or a blocked host as a bug in the code under test and burns steps on it (observed).
+// Point it at the verified constraints instead of restating them here — the file is the
+// source, this is a reference to it (see wiki/domain/turn-input-references.md).
+const SANDBOX_SKILL_REL = ["skills", "cc-cli-sandbox", "SKILL.md"];
+/** Locate the cc-cli-sandbox skill in the user's plugin tree, if it is installed. */
+function findSandboxSkill(): string | undefined {
+  const override = process.env.CODEX_BRIDGE_SANDBOX_SKILL;
+  if (override) return fs.existsSync(override) ? override : undefined;
+  // $HOME rather than os.homedir(): the latter needs deno's --allow-sys, and this driver
+  // has to run unchanged on node, deno and bun.
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  if (!home) return undefined;
+  // Plugins live at ~/.claude/plugins/<kind>/<marketplace>/<plugin>/<revision>/, so the
+  // skill sits within a few levels; walk that far and no further.
+  let level = [path.join(home, ".claude", "plugins")];
+  for (let depth = 0; depth < 5 && level.length > 0; depth++) {
+    const next: string[] = [];
+    for (const dir of level) {
+      const candidate = path.join(dir, ...SANDBOX_SKILL_REL);
+      if (fs.existsSync(candidate)) return candidate;
+      try {
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (e.isDirectory() && !e.name.startsWith(".")) next.push(path.join(dir, e.name));
+        }
+      } catch { /* unreadable: skip */ }
+    }
+    level = next;
+  }
+  return undefined;
+}
+const sandboxSkill = findSandboxSkill();
+const DEVELOPER_INSTRUCTIONS = [
+  "You are running inside the Claude Code CLI's OS sandbox. You did not configure it and",
+  "cannot change it. Writes are confined (the working directory and $TMPDIR are writable;",
+  "$HOME and /tmp directly are not) and network egress is limited to an allowlist.",
+  'So: a write that fails with "Read-only file system" or "Operation not permitted", or an',
+  "outbound request that fails to connect, is almost always this sandbox rather than a defect",
+  "in the code you are looking at. Put scratch files under $TMPDIR and carry on; do not try to",
+  "disable or work around the sandbox, and do not report it as a finding.",
+  ...(sandboxSkill
+    ? [
+      `The verified constraints and failure signatures are in ${sandboxSkill} — read that file`,
+      "when a command fails in one of those ways.",
+    ]
+    : []),
+].join("\n");
 
 const progress = (event: string, detail: Record<string, unknown>): void => {
   console.error(JSON.stringify({ event, ...detail }));
@@ -238,12 +311,19 @@ function request<T>(method: string, params: unknown): Promise<T> {
   });
 }
 /** request() with a deadline — for control-plane calls that must answer promptly. */
-function controlRequest<T>(method: string, params: unknown, timeoutMs = CONTROL_TIMEOUT_MS): Promise<T> {
+function controlRequest<T>(
+  method: string,
+  params: unknown,
+  timeoutMs = CONTROL_TIMEOUT_MS,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     request<T>(method, params),
     new Promise<never>((_, rej) => {
-      timer = setTimeout(() => rej(new Error(`${method}: no response after ${timeoutMs}ms`)), timeoutMs);
+      timer = setTimeout(
+        () => rej(new Error(`${method}: no response after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
     }),
   ]).finally(() => clearTimeout(timer));
 }
@@ -398,8 +478,7 @@ send({ jsonrpc: "2.0", method: "initialized", params: {} });
   const probeName = `.codex-cc-bridge-probe-${process.pid}-${Math.floor(Math.random() * 1e9)}`;
   const probeWrite = (dir: string, label: string): string =>
     `${label}=BLOCKED; if touch "${dir}/${probeName}" 2>/dev/null; then ${label}=WRITABLE; rm -f "${dir}/${probeName}"; fi; `;
-  const script =
-    probeWrite("$HOME", "home") +
+  const script = probeWrite("$HOME", "home") +
     probeWrite("/tmp", "tmp") +
     probeWrite(".", "cwdw") +
     `echo "$home $tmp $cwdw"`;
@@ -414,16 +493,22 @@ send({ jsonrpc: "2.0", method: "initialized", params: {} });
       timeoutMs: PROBE_TIMEOUT_MS - 5000,
     },
     PROBE_TIMEOUT_MS,
-  ).catch((e: Error) => fail(`containment probe failed (refusing to run a turn): ${e.message ?? e}`));
+  ).catch((e: Error) =>
+    fail(`containment probe failed (refusing to run a turn): ${e.message ?? e}`)
+  );
   if (probe.exitCode !== 0) {
     fail(
-      `containment probe did not run cleanly (exit ${probe.exitCode}, stderr: ${String(probe.stderr ?? "").trim()}). Refusing to run a turn.`,
+      `containment probe did not run cleanly (exit ${probe.exitCode}, stderr: ${
+        String(probe.stderr ?? "").trim()
+      }). Refusing to run a turn.`,
     );
   }
   const [home, tmp, cwdw] = String(probe.stdout ?? "").trim().split(/\s+/);
   if (home !== "BLOCKED" || tmp !== "BLOCKED") {
     fail(
-      `REFUSING TO RUN: the app-server at ${url} can write ${home !== "BLOCKED" ? "$HOME" : "/tmp"}, ` +
+      `REFUSING TO RUN: the app-server at ${url} can write ${
+        home !== "BLOCKED" ? "$HOME" : "/tmp"
+      }, ` +
         "so it is NOT confined by the Claude sandbox.\n" +
         "Kill it and restart it from a sandboxed (run_in_background) Bash: codex app-server --listen " +
         url,
@@ -439,26 +524,39 @@ send({ jsonrpc: "2.0", method: "initialized", params: {} });
 }
 // ---------------------------------------------------------------------------
 
+let resolved: ThreadResponse | undefined;
 if (threadId) {
   const r = await controlRequest<ThreadResponse>("thread/resume", {
     threadId,
     cwd,
     sandbox: PINNED_THREAD_SANDBOX,
     approvalPolicy: PINNED_APPROVAL_POLICY,
+    developerInstructions: DEVELOPER_INSTRUCTIONS,
+    ...(opts.model ? { model: opts.model } : {}),
   }).catch((e: Error) => fail(String(e.message ?? e)));
   threadId = r.thread?.id ?? threadId;
+  resolved = r;
 } else {
   const r = await controlRequest<ThreadResponse>("thread/start", {
     cwd,
     sandbox: PINNED_THREAD_SANDBOX,
     approvalPolicy: PINNED_APPROVAL_POLICY,
+    developerInstructions: DEVELOPER_INSTRUCTIONS,
     ephemeral: false,
     ...(opts.model ? { model: opts.model } : {}),
   }).catch((e: Error) => fail(String(e.message ?? e)));
   threadId = r.thread?.id;
+  resolved = r;
 }
 if (!threadId) fail("app-server returned no thread id");
-progress("thread", { threadId });
+// Report what the server resolved, not what we asked for: the only in-band evidence of
+// which model the thread runs. Note the server echoes an unknown name back unchanged --
+// this proves the parameter was accepted, not that the model exists.
+progress("thread", {
+  threadId,
+  model: resolved?.model ?? null,
+  effort: resolved?.reasoningEffort ?? null,
+});
 
 startRequested = true;
 if (reviewTarget) {
@@ -481,7 +579,7 @@ if (reviewTarget) {
   if (opts.model) params.model = opts.model;
   if (opts.effort) params.effort = opts.effort;
   const r = await controlRequest<TurnStartResponse>("turn/start", params).catch((e: Error) =>
-    fail(String(e.message ?? e)),
+    fail(String(e.message ?? e))
   );
   if (!r.turn?.id) fail("app-server returned no turn id for turn/start");
   activeTurnId = r.turn.id;

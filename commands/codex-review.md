@@ -1,6 +1,6 @@
 ---
 description: Run a Codex code review (native review/start) against local git state
-argument-hint: '[--base <branch>] [--commit <sha>] [--instructions <text>] (default: uncommitted changes)'
+argument-hint: '[--base <branch>] [--commit <sha>] [--instructions <text>] [--model <m>] (default: uncommitted changes)'
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(curl:*), Bash(codex:*), Bash(git:*)
 ---
 
@@ -15,24 +15,30 @@ Do not fix anything.
 
 Steps:
 
-1. **Server**: follow the skill's launch recipe (readyz check on the configured port, else
-   start the app-server as a background task, re-check readyz).
+1. **Server**: follow the skill's launch recipe — `codex-bridge.mts init` for the token file,
+   then start the app-server as a `run_in_background` Bash task (never with `&`), then
+   `codex-bridge.mts ready <that task's output file>` for the port. Every driver call needs
+   `--port <PORT> --token-file <TOKEN_FILE>`; there is no default port.
 2. **Pick the review target** from the arguments:
    - `--base <branch>` → `{"type":"baseBranch","branch":"<branch>"}`
    - `--commit <sha>` → `{"type":"commit","sha":"<sha>"}`
    - `--instructions <text>` → `{"type":"custom","instructions":"<text>"}`
    - none of the above → `{"type":"uncommittedChanges"}`
-3. **Egress disclosure**: before starting, show the user the scope of what will be sent
-   to OpenAI (e.g. `git status --short` / `git diff --stat` for the chosen target). If the
-   working tree contains obviously sensitive unstaged files, point that out and narrow the
-   target instead of sending them.
+   `--model <m>` may also be passed through: it is a thread-level setting, so it applies to
+   the review. `--effort` is turn-level and cannot be used with a review.
+3. **Do not present an egress scope.** Codex reads files and runs commands on its own, so
+   the review target bounds what it is asked to look at, not what can reach OpenAI — that
+   upper bound is the Claude sandbox's read scope (invariant 4 in the skill). Showing
+   `git diff --stat` as "what will be sent" would imply that everything else stays local,
+   which is false. If the working tree holds secrets, the answer is to fix the sandbox read
+   configuration or not to run Codex here, not to narrow the target.
 4. **Run the review as a background task** (reviews regularly take >10 minutes). Write the
    target JSON to a temp file with the Write tool and feed it via stdin redirection
    (`--review-target -`) so branch names, shas, or instructions never pass through the
    shell (no expansion, no heredoc-delimiter collisions):
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --token-file <TOKEN_FILE> --review-target - < /path/to/target.json
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --port <PORT> --token-file <TOKEN_FILE> --review-target - < /path/to/target.json
    ```
 
    (`<TOKEN_FILE>` is the capability-token file from the skill's launch recipe.)

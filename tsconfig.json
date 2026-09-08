@@ -10,5 +10,5 @@
     "erasableSyntaxOnly": true,
     "skipLibCheck": true
   },
-  "files": ["scripts/codex-turn.mts", "scripts/check.mts"]
+  "files": ["scripts/codex-turn.mts", "scripts/codex-bridge.mts", "scripts/check.mts"]
 }

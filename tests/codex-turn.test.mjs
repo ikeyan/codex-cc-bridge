@@ -24,7 +24,9 @@ const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 // runtime executes the driver under test (node | deno | bun).
 const DRIVER_CMD = (() => {
   const rt = process.env.CODEX_TURN_DRIVER_RUNTIME ?? "node";
-  if (rt === "deno") return ["deno", "run", "--quiet", "--allow-env", "--allow-read", "--allow-net", DRIVER];
+  if (rt === "deno") {
+    return ["deno", "run", "--quiet", "--allow-env", "--allow-read", "--allow-net", DRIVER];
+  }
   if (rt === "bun") return ["bun", DRIVER];
   return [process.execPath, DRIVER];
 })();
@@ -90,7 +92,7 @@ function startMockServer(onMessage) {
         if (buf.length < off + maskLen + len) return;
         const mask = masked ? buf.slice(off, off + 4) : null;
         const payload = buf.slice(off + maskLen, off + maskLen + len);
-        if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+        if (mask) { for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4]; }
         buf = buf.slice(off + maskLen + len);
         if (opcode === 8) {
           socket.end();
@@ -128,14 +130,19 @@ function appServerBehaviour(
       if (beforeInit) beforeInit(send);
       send({ jsonrpc: "2.0", id: msg.id, result: { userAgent: "mock" } });
     } else if (msg.method === "command/exec") {
-      send({ jsonrpc: "2.0", id: msg.id, result: { exitCode: 0, stdout: probeStdout + "\n", stderr: "" } });
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { exitCode: 0, stdout: probeStdout + "\n", stderr: "" },
+      });
     } else if (msg.method === "thread/start" || msg.method === "thread/resume") {
       send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
     } else if (msg.method === "turn/start" || msg.method === "review/start") {
       send({
         jsonrpc: "2.0",
         id: msg.id,
-        result: turnStartResult ?? { reviewThreadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } },
+        result: turnStartResult ??
+          { reviewThreadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } },
       });
       if (turnStartResult) return;
       if (onTurnStart) {
@@ -145,12 +152,19 @@ function appServerBehaviour(
       send({
         jsonrpc: "2.0",
         method: "item/completed",
-        params: { threadId: "thread-1", turnId: "turn-1", item: { type: "agentMessage", text: "MOCK_DONE", phase: "final_answer" } },
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: { type: "agentMessage", text: "MOCK_DONE", phase: "final_answer" },
+        },
       });
       send({
         jsonrpc: "2.0",
         method: "turn/completed",
-        params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", error: null, items: [] } },
+        params: {
+          threadId: "thread-1",
+          turn: { id: "turn-1", status: "completed", error: null, items: [] },
+        },
       });
     } else {
       send({ jsonrpc: "2.0", id: msg.id, result: {} });
@@ -159,9 +173,14 @@ function appServerBehaviour(
 }
 
 function runDriver(args, { port, stdin, env, noToken } = {}) {
-  const fullArgs = noToken || args.includes("--token-file") ? args : ["--token-file", TOKEN_PATH, ...args];
+  const fullArgs = noToken || args.includes("--token-file")
+    ? args
+    : ["--token-file", TOKEN_PATH, ...args];
   return new Promise((resolve) => {
-    const child = spawnDriver(fullArgs, { ...(port ? { CODEX_BRIDGE_PORT: String(port) } : {}), ...env });
+    const child = spawnDriver(fullArgs, {
+      ...(port ? { CODEX_BRIDGE_PORT: String(port) } : {}),
+      ...env,
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
@@ -231,7 +250,9 @@ test("containment: HOME or /tmp writable => refuse before any thread exists", as
 
 test("containment: cwd not writable => refuse (wrong session's server)", async () => {
   const recorded = [];
-  const server = await startMockServer(appServerBehaviour(recorded, { probeStdout: "BLOCKED BLOCKED BLOCKED" }));
+  const server = await startMockServer(
+    appServerBehaviour(recorded, { probeStdout: "BLOCKED BLOCKED BLOCKED" }),
+  );
   const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "hi" });
   server.close();
   assert.notEqual(r.code, 0);
@@ -242,7 +263,10 @@ test("containment: cwd not writable => refuse (wrong session's server)", async (
 test("resume: thread/resume also carries pinned sandbox values", async () => {
   const recorded = [];
   const server = await startMockServer(appServerBehaviour(recorded));
-  const r = await runDriver(["--cwd", "/tmp", "--thread", "thread-1"], { port: server.port, stdin: "again" });
+  const r = await runDriver(["--cwd", "/tmp", "--thread", "thread-1"], {
+    port: server.port,
+    stdin: "again",
+  });
   server.close();
   assert.equal(r.code, 0, r.stderr);
 
@@ -270,16 +294,47 @@ test("review: review/start carries target verbatim on a danger-pinned thread", a
   assert.equal(findRequest(recorded, "turn/start"), undefined);
 });
 
+test("thread/start tells codex it is inside the Claude sandbox", async () => {
+  const recorded = [];
+  const server = await startMockServer(appServerBehaviour(recorded));
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "hi" });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  const instructions = findRequest(recorded, "thread/start").params.developerInstructions;
+  assert.match(instructions, /Claude Code CLI's OS sandbox/);
+  assert.match(instructions, /\$TMPDIR/);
+});
+
+test("the sandbox brief points at the skill file when one is found", async () => {
+  const notes = join(mkdtempSync(join(tmpdir(), "codex-turn-skill-")), "SKILL.md");
+  writeFileSync(notes, "# cc-cli-sandbox\n");
+  const recorded = [];
+  const server = await startMockServer(appServerBehaviour(recorded));
+  const r = await runDriver(["--cwd", "/tmp"], {
+    port: server.port,
+    stdin: "hi",
+    env: { CODEX_BRIDGE_SANDBOX_SKILL: notes },
+  });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(
+    findRequest(recorded, "thread/start").params.developerInstructions.includes(notes),
+    "expected the resolved skill path to be referenced",
+  );
+});
+
 test("unknown flags are rejected before connecting (no sandbox injection path)", async () => {
   let connected = false;
   const server = await startMockServer(() => {
     connected = true;
   });
-  for (const args of [
-    ["--sandbox", "read-only"],
-    ["--sandbox-policy", '{"type":"readOnly"}'],
-    ["--approval-policy", "untrusted"],
-  ]) {
+  for (
+    const args of [
+      ["--sandbox", "read-only"],
+      ["--sandbox-policy", '{"type":"readOnly"}'],
+      ["--approval-policy", "untrusted"],
+    ]
+  ) {
     const r = await runDriver(args, { port: server.port, stdin: "x" });
     assert.equal(r.code, 2, `expected rejection for ${args[0]}`);
     assert.match(r.stderr, /Unknown option/i);
@@ -300,6 +355,13 @@ test("missing capability token is rejected before connecting", async () => {
   assert.equal(connected, false);
 });
 
+test("no endpoint is rejected before connecting (there is no default port)", async () => {
+  // spawnDriver inherits process.env, so blank the var a developer may have set.
+  const r = await runDriver(["--cwd", "/tmp"], { stdin: "x", env: { CODEX_BRIDGE_PORT: "" } });
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /no endpoint/);
+});
+
 test("non-loopback endpoints are rejected before connecting", async () => {
   const r = await runDriver(["--cwd", "/tmp", "--url", "ws://192.168.1.10:41100"], { stdin: "x" });
   assert.equal(r.code, 2);
@@ -315,17 +377,54 @@ test("review tuning flags that cannot be applied are rejected", async () => {
     connected = true;
   });
   const target = JSON.stringify({ type: "uncommittedChanges" });
-  for (const extra of [
-    ["--model", "gpt-5"],
-    ["--effort", "high"],
-    ["--schema", "/dev/null"],
-    ["--prompt", "hi"],
-  ]) {
+  // review/start carries only {threadId, target, delivery}: a prompt, an outputSchema and a
+  // per-turn effort have nowhere to go. --model is NOT here; it is thread-level (below).
+  for (
+    const extra of [
+      ["--effort", "high"],
+      ["--schema", "/dev/null"],
+      ["--prompt", "hi"],
+    ]
+  ) {
     const r = await runDriver(["--review-target", target, ...extra], { port: server.port });
     assert.equal(r.code, 2, `expected rejection for --review-target with ${extra[0]}`);
   }
   server.close();
   assert.equal(connected, false);
+});
+
+test("review: --model rides on thread/start (review/start has no model slot)", async () => {
+  const recorded = [];
+  const server = await startMockServer(appServerBehaviour(recorded));
+  const r = await runDriver([
+    "--cwd",
+    "/tmp",
+    "--model",
+    "gpt-5.4-mini",
+    "--review-target",
+    JSON.stringify({ type: "uncommittedChanges" }),
+  ], { port: server.port });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+
+  assert.equal(findRequest(recorded, "thread/start").params.model, "gpt-5.4-mini");
+  assert.equal(findRequest(recorded, "review/start").params.model, undefined);
+});
+
+test("resume carries --model too (ThreadResumeParams accepts it)", async () => {
+  const recorded = [];
+  const server = await startMockServer(appServerBehaviour(recorded));
+  const r = await runDriver([
+    "--cwd",
+    "/tmp",
+    "--thread",
+    "thread-9",
+    "--model",
+    "gpt-5.4-mini",
+  ], { port: server.port, stdin: "hi" });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(findRequest(recorded, "thread/resume").params.model, "gpt-5.4-mini");
 });
 
 test("events from unrelated threads and turns are ignored", async () => {
@@ -338,33 +437,53 @@ test("events from unrelated threads and turns are ignored", async () => {
         send({
           jsonrpc: "2.0",
           method: "item/completed",
-          params: { threadId: "other-thread", item: { type: "agentMessage", text: "WRONG", phase: "final_answer" } },
+          params: {
+            threadId: "other-thread",
+            item: { type: "agentMessage", text: "WRONG", phase: "final_answer" },
+          },
         });
         send({
           jsonrpc: "2.0",
           method: "item/completed",
-          params: { threadId: "thread-1", turnId: "other-turn", item: { type: "agentMessage", text: "WRONG2", phase: "final_answer" } },
+          params: {
+            threadId: "thread-1",
+            turnId: "other-turn",
+            item: { type: "agentMessage", text: "WRONG2", phase: "final_answer" },
+          },
         });
         send({
           jsonrpc: "2.0",
           method: "turn/completed",
-          params: { threadId: "other-thread", turn: { id: "other-turn", status: "completed", items: [] } },
+          params: {
+            threadId: "other-thread",
+            turn: { id: "other-turn", status: "completed", items: [] },
+          },
         });
         send({
           jsonrpc: "2.0",
           method: "turn/completed",
-          params: { threadId: "thread-1", turn: { id: "child-turn", status: "completed", items: [] } },
+          params: {
+            threadId: "thread-1",
+            turn: { id: "child-turn", status: "completed", items: [] },
+          },
         });
         // The real completion.
         send({
           jsonrpc: "2.0",
           method: "item/completed",
-          params: { threadId: "thread-1", turnId: "turn-1", item: { type: "agentMessage", text: "RIGHT", phase: "final_answer" } },
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: { type: "agentMessage", text: "RIGHT", phase: "final_answer" },
+          },
         });
         send({
           jsonrpc: "2.0",
           method: "turn/completed",
-          params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", error: null, items: [] } },
+          params: {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "completed", error: null, items: [] },
+          },
         });
       },
     }),
@@ -386,7 +505,10 @@ test("completions arriving before our turn is identified are ignored", async () 
         send({
           jsonrpc: "2.0",
           method: "turn/completed",
-          params: { threadId: "other-thread", turn: { id: "other-turn", status: "completed", items: [] } },
+          params: {
+            threadId: "other-thread",
+            turn: { id: "other-turn", status: "completed", items: [] },
+          },
         });
         send({
           jsonrpc: "2.0",
@@ -426,13 +548,20 @@ test("latest agent message wins when no final_answer phase is present", async ()
           send({
             jsonrpc: "2.0",
             method: "item/completed",
-            params: { threadId: "thread-1", turnId: "turn-1", item: { type: "agentMessage", text } },
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-1",
+              item: { type: "agentMessage", text },
+            },
           });
         }
         send({
           jsonrpc: "2.0",
           method: "turn/completed",
-          params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", error: null, items: [] } },
+          params: {
+            threadId: "thread-1",
+            turn: { id: "turn-1", status: "completed", error: null, items: [] },
+          },
         });
       },
     }),
@@ -478,14 +607,22 @@ test("SIGTERM racing the turn/start response still interrupts the turn", async (
     if (msg.method) recorded.push(msg);
     if (msg.id === undefined) return;
     if (msg.method === "initialize") send({ jsonrpc: "2.0", id: msg.id, result: {} });
-    else if (msg.method === "command/exec")
-      send({ jsonrpc: "2.0", id: msg.id, result: { exitCode: 0, stdout: "BLOCKED BLOCKED WRITABLE\n", stderr: "" } });
-    else if (msg.method === "thread/start") send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
-    else if (msg.method === "turn/start") {
+    else if (msg.method === "command/exec") {
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { exitCode: 0, stdout: "BLOCKED BLOCKED WRITABLE\n", stderr: "" },
+      });
+    } else if (msg.method === "thread/start") {
+      send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
+    } else if (msg.method === "turn/start") {
       // The server accepted the turn but the response is slow: kill the driver
       // first, answer afterwards.
       setTimeout(() => child.kill("SIGTERM"), 50);
-      setTimeout(() => send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "turn-1" } } }), 400);
+      setTimeout(
+        () => send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "turn-1" } } }),
+        400,
+      );
     } else {
       send({ jsonrpc: "2.0", id: msg.id, result: {} });
     }
@@ -509,7 +646,9 @@ test("SIGTERM racing the turn/start response still interrupts the turn", async (
 
 test("a start response without a turn id fails instead of hanging", async () => {
   const recorded = [];
-  const server = await startMockServer(appServerBehaviour(recorded, { turnStartResult: { turn: {} } }));
+  const server = await startMockServer(
+    appServerBehaviour(recorded, { turnStartResult: { turn: {} } }),
+  );
   const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
   server.close();
   assert.equal(r.code, 1);
@@ -552,7 +691,10 @@ test("server->client requests get schema-valid denials (fail closed)", async () 
       send({
         jsonrpc: "2.0",
         method: "turn/completed",
-        params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", error: null, items: [] } },
+        params: {
+          threadId: "thread-1",
+          turn: { id: "turn-1", status: "completed", error: null, items: [] },
+        },
       });
       return;
     }
@@ -560,12 +702,21 @@ test("server->client requests get schema-valid denials (fail closed)", async () 
     if (msg.method === "initialize") {
       send({ jsonrpc: "2.0", id: msg.id, result: {} });
     } else if (msg.method === "command/exec") {
-      send({ jsonrpc: "2.0", id: msg.id, result: { exitCode: 0, stdout: "BLOCKED BLOCKED WRITABLE\n", stderr: "" } });
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { exitCode: 0, stdout: "BLOCKED BLOCKED WRITABLE\n", stderr: "" },
+      });
     } else if (msg.method === "thread/start") {
       send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
     } else if (msg.method === "turn/start") {
       send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "turn-1" } } });
-      send({ jsonrpc: "2.0", id: 901, method: "item/commandExecution/requestApproval", params: {} });
+      send({
+        jsonrpc: "2.0",
+        id: 901,
+        method: "item/commandExecution/requestApproval",
+        params: {},
+      });
       send({ jsonrpc: "2.0", id: 902, method: "execCommandApproval", params: {} });
       send({ jsonrpc: "2.0", id: 903, method: "item/tool/requestUserInput", params: {} });
     }
