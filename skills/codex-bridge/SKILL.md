@@ -97,7 +97,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> < /path/to/p
   実際にそのモデルで走ったかは、turn が正常完了したことと
   `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.mts" turn-context <threadId> [<turnId>]` が出す
   `turn_context.model` (server 側の記録) で確かめる。同じ記録の `sandbox_policy` / `approval_policy`
-  で、danger-full-access / never が実際に適用されたことも事後確認できる。
+  で、danger-full-access / never が実際に適用されたことも事後確認できる。**review の記録は出力の
+  `children[]` (subagent の子 thread) 側にある** — 親 thread には review の turn_context が無い。
 - 効力: `--effort E` (任意)。**turn 単位の設定なのでレビューには渡せない** (driver が拒否する)。
   レビューの effort は `~/.codex/config.toml` の `model_reasoning_effort` に従う。
 - 並行: 独立したタスクは複数 background task で fan-out してよい

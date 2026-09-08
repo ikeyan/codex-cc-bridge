@@ -158,8 +158,14 @@ function* rolloutFiles(dir: string): Generator<string> {
   }
 }
 
-/** Thread id from a rollout's first record, or undefined when it is not a session_meta. */
-function rolloutThreadId(file: string): string | undefined {
+interface RolloutMeta {
+  id?: string;
+  /** Set on subagent threads, e.g. the child review/start runs the review in. */
+  parent_thread_id?: string;
+  source?: unknown;
+}
+/** A rollout's first record (session_meta) payload, or undefined when it is not one. */
+function rolloutMeta(file: string): RolloutMeta | undefined {
   const fd = fs.openSync(file, "r");
   try {
     // session_meta is the first line and can be large (it embeds base_instructions).
@@ -168,7 +174,7 @@ function rolloutThreadId(file: string): string | undefined {
     const nl = buf.indexOf(0x0a);
     if (nl < 0 || nl >= n) return undefined;
     const rec = JSON.parse(buf.subarray(0, nl).toString("utf8"));
-    return rec?.type === "session_meta" ? rec.payload?.id : undefined;
+    return rec?.type === "session_meta" ? rec.payload : undefined;
   } catch {
     return undefined;
   } finally {
@@ -176,14 +182,7 @@ function rolloutThreadId(file: string): string | undefined {
   }
 }
 
-function turnContext(threadId: string, turnId?: string): void {
-  const sessions = path.join(codexHome, "sessions");
-  const matches = [...rolloutFiles(sessions)].filter((f) => rolloutThreadId(f) === threadId);
-  if (matches.length === 0) fail(`no rollout under ${sessions} has session_meta.id ${threadId}`);
-  if (matches.length > 1) {
-    fail(`ambiguous: ${matches.length} rollouts claim thread ${threadId}:\n${matches.join("\n")}`);
-  }
-  const rollout = matches[0];
+function turnContextsIn(rollout: string, turnId?: string): unknown[] {
   const contexts: unknown[] = [];
   let unparsable = 0;
   for (const line of fs.readFileSync(rollout, "utf8").split("\n")) {
@@ -199,13 +198,43 @@ function turnContext(threadId: string, turnId?: string): void {
     if (turnId !== undefined && rec.payload?.turn_id !== turnId) continue;
     contexts.push(rec.payload);
   }
-  if (turnId !== undefined && contexts.length === 0) {
-    fail(`rollout ${rollout} has no turn_context for turn ${turnId}`);
-  }
   if (unparsable > 0) {
     console.error(`codex-bridge: skipped ${unparsable} unparsable line(s) in ${rollout}`);
   }
-  console.log(JSON.stringify({ rollout, turnContexts: contexts }, null, 2));
+  return contexts;
+}
+
+function turnContext(threadId: string, turnId?: string): void {
+  const sessions = path.join(codexHome, "sessions");
+  const own: string[] = [];
+  // review/start runs the review in a subagent child thread whose rollout carries the
+  // turn_context (the parent's has none), so children are part of the answer.
+  const children: { threadId: string; rollout: string; source: unknown }[] = [];
+  for (const f of rolloutFiles(sessions)) {
+    const meta = rolloutMeta(f);
+    if (meta?.id === threadId) own.push(f);
+    else if (meta?.parent_thread_id === threadId && meta.id) {
+      children.push({ threadId: meta.id, rollout: f, source: meta.source ?? null });
+    }
+  }
+  if (own.length === 0) fail(`no rollout under ${sessions} has session_meta.id ${threadId}`);
+  if (own.length > 1) {
+    fail(`ambiguous: ${own.length} rollouts claim thread ${threadId}:\n${own.join("\n")}`);
+  }
+  const rollout = own[0];
+  const result = {
+    rollout,
+    turnContexts: turnContextsIn(rollout, turnId),
+    children: children.map((c) => ({ ...c, turnContexts: turnContextsIn(c.rollout, turnId) })),
+  };
+  const total = result.turnContexts.length +
+    result.children.reduce((n, c) => n + c.turnContexts.length, 0);
+  if (turnId !== undefined && total === 0) {
+    fail(
+      `neither ${rollout} nor its ${children.length} child rollout(s) has a turn_context for turn ${turnId}`,
+    );
+  }
+  console.log(JSON.stringify(result, null, 2));
 }
 
 const { positionals } = (() => {

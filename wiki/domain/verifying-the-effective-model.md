@@ -48,6 +48,13 @@ codex は thread ごとの記録を `~/.codex/sessions/<年>/<月>/<日>/rollout
 `session_meta.payload.id` で構造的に照合し、複数一致は推測せずエラーにする。driver は結果 JSON に
 `turnId` を載せるので、resume で turn が複数ある thread でもその turn の記録だけを引ける。
 
+**review の記録は子 thread にある。**`review/start` はレビューを subagent の子 thread で走らせ、
+`turn_context` はその子 rollout (`session_meta.parent_thread_id` が親) にしか書かれない。だから
+`turn-context` は親に加えて `parent_thread_id` で子を集め、`children` として返す。review で
+確かめるべき `model` / `sandbox_policy` は `children[].turnContexts` の方を見る
+(canon: `facts/codex/review-start-inline-same-thread`)。driver が返す `turnId` は親 turn の id で、
+子 turn の id とは別物 (レビュー中に親 threadId で届く別 turnId の `turn/started` がそれ)。
+
 ## ついでに得られるもの
 
 同じ `turn_context` に `sandbox_policy` と `approval_policy` も記録される。つまりこの記録は

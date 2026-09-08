@@ -174,7 +174,8 @@ function fakeCodexHome(rollouts) {
   }
   return home;
 }
-const meta = (id) => JSON.stringify({ type: "session_meta", payload: { id, session_id: id } });
+const meta = (id, extra = {}) =>
+  JSON.stringify({ type: "session_meta", payload: { id, session_id: id, ...extra } });
 const ctx = (turn_id, model) =>
   JSON.stringify({
     type: "turn_context",
@@ -208,11 +209,41 @@ test("turn-context: matches the thread by session_meta.id and prints its turn_co
 
   const noTurn = await run(["turn-context", "thread-A", "turn-404"], { CODEX_HOME: home });
   assert.equal(noTurn.code, 1);
-  assert.match(noTurn.stderr, /no turn_context for turn turn-404/);
+  assert.match(noTurn.stderr, /turn_context for turn turn-404/);
 
   const noThread = await run(["turn-context", "thread-Z"], { CODEX_HOME: home });
   assert.equal(noThread.code, 1);
   assert.match(noThread.stderr, /no rollout/);
+});
+
+test("turn-context: includes subagent child rollouts (where a review's turn_context lives)", async () => {
+  const home = fakeCodexHome({
+    "rollout-parent.jsonl": [meta("thread-A"), JSON.stringify({ type: "event_msg", payload: {} })],
+    "rollout-child.jsonl": [
+      meta("thread-A-review", { parent_thread_id: "thread-A", source: { subagent: "review" } }),
+      ctx("review-turn", "gpt-5.4-mini"),
+    ],
+    "rollout-unrelated-child.jsonl": [
+      meta("thread-B-child", { parent_thread_id: "thread-B" }),
+      ctx("other", "m"),
+    ],
+  });
+  const r = await run(["turn-context", "thread-A"], { CODEX_HOME: home });
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.deepEqual(out.turnContexts, []);
+  assert.equal(out.children.length, 1);
+  assert.equal(out.children[0].threadId, "thread-A-review");
+  assert.deepEqual(out.children[0].source, { subagent: "review" });
+  assert.deepEqual(out.children[0].turnContexts.map((c) => c.model), ["gpt-5.4-mini"]);
+
+  // A turn id found only in a child still counts as found.
+  const byTurn = await run(["turn-context", "thread-A", "review-turn"], { CODEX_HOME: home });
+  assert.equal(byTurn.code, 0, byTurn.stderr);
+  assert.equal(JSON.parse(byTurn.stdout).children[0].turnContexts.length, 1);
+  const missing = await run(["turn-context", "thread-A", "nope"], { CODEX_HOME: home });
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /child rollout/);
 });
 
 test("turn-context: two rollouts claiming one thread is an error, not a guess", async () => {
