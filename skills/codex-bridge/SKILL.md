@@ -84,7 +84,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> < /path/to/p
 - 結果: stdout に JSON `{ threadId, turnId, turnStatus, turnError, finalMessage, tokenUsage }`。
 - 進捗: stderr に 1 行 1 イベント (コマンド実行・エージェントメッセージ)。Monitor で追える。
 - キャンセル: TaskStop (SIGTERM) で driver は `turn/interrupt` を送ってから終了する。
-  server 側の turn も止まる (放置トークン消費なし)。
+  server 側の turn も止まる (放置トークン消費なし)。review は subagent の子 turn で走るので、
+  driver は子 turn (自 thread に届く別 turnId の `turn/started`) を先に interrupt する。
 - マルチターン: 結果の `threadId` を `--thread <id>` に渡すと文脈込みで継続する。
 - 構造化出力: `--schema <file.json>` (JSON Schema) で最終メッセージを constrained にできる。
 - ネイティブレビュー: `--review uncommitted|base|commit|custom`。モードだけがフラグで、

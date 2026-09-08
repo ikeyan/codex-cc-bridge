@@ -57,3 +57,9 @@ SIGTERM / SIGINT (= CC の `TaskStop`) を受けたら `turn/interrupt` を送�
 サーバー側の turn を止めないと、driver が死んだあともトークンを消費し続けファイルを書き換え得るため。
 `turn/start` の応答待ち中に signal が来た場合は turn id が無いので、最大 3 秒だけ id の到着を
 待ってから interrupt する。
+
+review では本体が subagent の子 turn で走り、**親 turn だけを interrupt しても子は止まらない**
+(実測: 90 秒走り続けた)。子 turn の id は自分の thread に別 turnId で届く `turn/started` に
+乗ってくるので、driver はそれを覚えておき、signal 時は子 → 親の順に `turn/interrupt` を送る
+(子を止めると親も同時に abort される。canon: `facts/codex/review-start-inline-same-thread`)。
+`turn/started` を見るのはこの目的だけで、完了判定には使わない。

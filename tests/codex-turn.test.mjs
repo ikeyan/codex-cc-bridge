@@ -730,6 +730,42 @@ test("latest agent message wins when no final_answer phase is present", async ()
   assert.equal(JSON.parse(r.stdout).finalMessage, "actual answer");
 });
 
+test("SIGTERM during a review interrupts the subagent child turn as well as ours", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        // What a real review emits on our thread: a turn/started for the child turn.
+        send({
+          jsonrpc: "2.0",
+          method: "turn/started",
+          params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+        });
+        setTimeout(() => child.kill("SIGTERM"), 150);
+      },
+    }),
+  );
+  const result = new Promise((resolve) => {
+    child = spawnDriver(
+      ["--session", makeSession(server.port), "--cwd", "/tmp", "--review", "uncommitted"],
+      {},
+    );
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.end();
+  });
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
+  const interrupts = recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params);
+  assert.deepEqual(interrupts, [
+    { threadId: "thread-1", turnId: "child-turn" },
+    { threadId: "thread-1", turnId: "turn-1" },
+  ]);
+});
+
 test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
   const recorded = [];
   let child;

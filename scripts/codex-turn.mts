@@ -324,6 +324,10 @@ interface PendingRequest {
 const pending = new Map<number, PendingRequest>();
 let threadId: string | undefined = opts.thread;
 let activeTurnId: string | null = null;
+// review/start runs the review in a subagent child turn; its id arrives as a turn/started on
+// OUR thread with a turn id other than ours. Interrupting only our (parent) turn leaves that
+// child running (measured), so remember it for turn/interrupt.
+let childTurnId: string | null = null;
 let startRequested = false;
 let finalAnswer: string | null = null;
 let lastAgentMessage: string | null = null;
@@ -458,6 +462,11 @@ ws.onmessage = (raw: MessageEvent) => {
       if (activeTurnId === null) earlyEvents.push({ method: msg.method, params });
       else handleTurnEvent(msg.method, params);
       break;
+    case "turn/started": {
+      const id = params.turn?.id;
+      if (id !== undefined && activeTurnId !== null && id !== activeTurnId) childTurnId = id;
+      break;
+    }
     case "thread/tokenUsage/updated":
       usageInfo = params.tokenUsage ?? params ?? null;
       break;
@@ -480,7 +489,11 @@ function onSignal(signal: string): void {
     process.exit(130);
   };
   const interrupt = (): void => {
-    request("turn/interrupt", { threadId, turnId: activeTurnId }).then(finish, finish);
+    // Child first: for a review it is the turn doing the work, and interrupting it also
+    // aborts the parent. Interrupting the parent alone does not reach the child.
+    const targets = [...(childTurnId ? [childTurnId] : []), activeTurnId];
+    Promise.all(targets.map((turnId) => request("turn/interrupt", { threadId, turnId })))
+      .then(finish, finish);
     setTimeout(finish, 3000);
   };
   if (threadId && activeTurnId) {
