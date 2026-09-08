@@ -73,7 +73,7 @@ prompt は stdin から渡す。**Write ツールで一時ファイルに書き�
 起きない。turn は原則 run_in_background の Bash で:
 
 ```
-node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --port <PORT> --token-file <TOKEN_FILE> < /path/to/prompt.txt
+node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --port <PORT> --token-file <TOKEN_FILE> < /path/to/prompt.txt
 ```
 
 (env でも渡せる: `CODEX_BRIDGE_PORT` / `CODEX_BRIDGE_TOKEN_FILE`。どちらも欠けると driver は
@@ -104,7 +104,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --port <PORT> -
 **ファイルの中身をプロンプトに貼らない。**Codex は自分で読み、コマンドを実行できる。
 渡すのは「何をしてほしいかの意図と制約」+「対象への参照」だけ:
 
-- リポジトリ相対のパス・ディレクトリ・glob (`--cwd "$PWD"` を渡すので相対で解決する)
+- リポジトリ相対のパス・ディレクトリ・glob (driver を起動したディレクトリが thread の cwd になるので相対で解決する。別の場所を対象にするときだけ `--cwd DIR`)
 - git の参照 — ブランチ名・sha、読ませたい `git diff --stat main...` のようなコマンド
 
 中身を書くのは **Codex から到達できない情報**だけ (Claude 側の文脈での判断、別セッション・

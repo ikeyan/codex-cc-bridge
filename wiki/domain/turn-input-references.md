@@ -24,7 +24,7 @@ Codex は [[security/why-danger-full-access|danger-full-access]] で動いてお
 | git の状態への参照 | ブランチ名、sha、 のような読ませたいコマンド |
 | 意図と制約 | 何を判断してほしいか、触ってよい範囲、出力の形 |
 
-パスがリポジトリ相対で通るのは、driver に `--cwd "$PWD"` を渡して thread の cwd をそこに
+パスがリポジトリ相対で通るのは、driver を起動したディレクトリ (既定。`--cwd` で上書き可) を thread の cwd に
 置いているため。
 
 ## 中身を貼ってよい唯一の場合

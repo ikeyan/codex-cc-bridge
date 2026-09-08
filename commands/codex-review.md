@@ -15,10 +15,8 @@ Do not fix anything.
 
 Steps:
 
-1. **Server**: follow the skill's launch recipe — `codex-bridge.mts init` for the token file,
-   then start the app-server as a `run_in_background` Bash task (never with `&`), then
-   `codex-bridge.mts ready <that task's output file>` for the port. Every driver call needs
-   `--port <PORT> --token-file <TOKEN_FILE>`; there is no default port.
+1. **Server**: if this session has no running app-server yet, follow the skill's launch recipe
+   (起動レシピ) exactly as written there; do not improvise the steps here.
 2. **Pick the review target** from the arguments:
    - `--base <branch>` → `{"type":"baseBranch","branch":"<branch>"}`
    - `--commit <sha>` → `{"type":"commit","sha":"<sha>"}`
@@ -38,7 +36,7 @@ Steps:
    shell (no expansion, no heredoc-delimiter collisions):
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --port <PORT> --token-file <TOKEN_FILE> --review-target - < /path/to/target.json
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --port <PORT> --token-file <TOKEN_FILE> --review-target - < /path/to/target.json
    ```
 
    (`<TOKEN_FILE>` is the capability-token file from the skill's launch recipe.)

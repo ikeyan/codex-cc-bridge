@@ -13,10 +13,8 @@ Raw slash-command arguments:
 
 Steps:
 
-1. **Server**: follow the skill's launch recipe — `codex-bridge.mts init` for the token file,
-   then start the app-server as a `run_in_background` Bash task (never with `&`), then
-   `codex-bridge.mts ready <that task's output file>` for the port. Every driver call needs
-   `--port <PORT> --token-file <TOKEN_FILE>`; there is no default port.
+1. **Server**: if this session has no running app-server yet, follow the skill's launch recipe
+   (起動レシピ) exactly as written there; do not improvise the steps here.
 2. **Compose the prompt from references, not contents**: state the intent and constraints,
    and point at the target with repo-relative paths, globs, branch names, shas, or commands
    to run. Codex reads files and runs commands itself, so do NOT paste file contents,
@@ -31,7 +29,7 @@ Steps:
    heredoc breaks if the text contains its delimiter line:
 
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --cwd "$PWD" --port <PORT> --token-file <TOKEN_FILE> [--thread <id>] [--model <m>] [--schema <file>] < /path/to/prompt.txt
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --port <PORT> --token-file <TOKEN_FILE> [--thread <id>] [--model <m>] [--schema <file>] < /path/to/prompt.txt
    ```
 
    (`<TOKEN_FILE>` is the capability-token file from the skill's launch recipe.)
