@@ -834,6 +834,40 @@ test("SIGTERM racing the turn/start response still interrupts the turn", async (
   assert.deepEqual(interrupt.params, { threadId: "thread-1", turnId: "turn-1" });
 });
 
+test("a 401 from OpenAI mid-turn interrupts and fails instead of waiting forever", async () => {
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        // What the app-server emits when it cannot read auth.json: retrying error events,
+        // never a turn/completed.
+        send({
+          jsonrpc: "2.0",
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            willRetry: true,
+            error: {
+              message: "Reconnecting... 1/5",
+              codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } },
+            },
+          },
+        });
+      },
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /401 Unauthorized/);
+  assert.match(r.stderr, /auth\.json/);
+  assert.deepEqual(findRequest(recorded, "turn/interrupt").params, {
+    threadId: "thread-1",
+    turnId: "turn-1",
+  });
+});
+
 test("a start response without a turn id fails instead of hanging", async () => {
   const recorded = [];
   const server = await startMockServer(

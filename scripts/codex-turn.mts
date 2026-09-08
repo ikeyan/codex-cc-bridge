@@ -328,6 +328,7 @@ let activeTurnId: string | null = null;
 // OUR thread with a turn id other than ours. Interrupting only our (parent) turn leaves that
 // child running (measured), so remember it for turn/interrupt.
 let childTurnId: string | null = null;
+let authBailed = false;
 let startRequested = false;
 let finalAnswer: string | null = null;
 let lastAgentMessage: string | null = null;
@@ -470,9 +471,31 @@ ws.onmessage = (raw: MessageEvent) => {
     case "thread/tokenUsage/updated":
       usageInfo = params.tokenUsage ?? params ?? null;
       break;
-    case "error":
+    case "error": {
       progress("error", { detail: params });
+      // Codex cannot authenticate to OpenAI (auth.json unreadable under a read-restricted
+      // sandbox, or logged out): the server retries forever and the turn never completes
+      // (measured), so waiting is pointless. Interrupt and say why.
+      const status = (params as {
+        error?: { codexErrorInfo?: { responseStreamDisconnected?: { httpStatusCode?: number } } };
+      })
+        .error?.codexErrorInfo?.responseStreamDisconnected?.httpStatusCode;
+      if (status === 401 && !settled && !authBailed) {
+        authBailed = true;
+        // fail() prints only while !settled, so leave settled to it.
+        const bail = (): never =>
+          fail(
+            "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
+              "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
+              "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
+          );
+        if (threadId && activeTurnId) {
+          request("turn/interrupt", { threadId, turnId: activeTurnId }).then(bail, bail);
+          setTimeout(bail, 3000);
+        } else bail();
+      }
       break;
+    }
     default:
       break;
   }
