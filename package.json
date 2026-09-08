@@ -3,6 +3,7 @@
   "private": true,
   "license": "MIT",
   "type": "module",
+  "allowScripts": {},
   "scripts": {
     "test": "node scripts/check.mts"
   },

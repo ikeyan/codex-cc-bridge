@@ -16,8 +16,9 @@ jobs:
       - uses: actions/checkout@v7
 
       # `npm test` (scripts/check.mts) runs the mock test suite with the driver
-      # under node, deno, and bun, plus `deno check` and `tsc`. All three
-      # runtimes must be present or the corresponding steps fail.
+      # under node, deno, and bun, plus `deno check`, `tsc`, `deno fmt/lint`,
+      # the wiki/ checks (uv + plasma-wiki), and the REVIEW.md upstream-sync
+      # check. Every runtime below must be present or its steps fail.
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -28,6 +29,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - uses: astral-sh/setup-uv@v10
 
-      - run: npm ci
+      # .npmrc の min-release-age は解決時 (npm install / dependabot) のための門。
+      # npm ci はロック済みの版を入れ直すだけなので外す — 外さないと cooldown 免除の
+      # security update PR が ETARGET で落ちる。
+      - run: npm ci --min-release-age=0
+      # PR では REVIEW.md の上流 drift を警告に留める (この PR と無関係な失敗にしない)。
       - run: npm test
+        env:
+          WARN: ${{ github.event_name == 'pull_request' && '1' || '' }}

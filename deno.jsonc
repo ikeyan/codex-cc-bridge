@@ -1,0 +1,16 @@
+{
+  // deno check 用の設定分離: tsconfig.json は tsc 専用 (lib が deno と非互換)。
+  // package.json があると deno が node 互換モードで既定 lib を落とすため、ここで明示する。
+  "compilerOptions": {
+    "lib": ["deno.window"]
+  },
+  "fmt": {
+    "lineWidth": 100,
+    // md は対象外: 日本語を語境界なしで折り返して壊す。REVIEW.md は上流と byte 一致も要る。
+    "exclude": ["**/*.md"]
+  },
+  "lint": {
+    // tests/ は node 専用ハーネス (driver だけ各ランタイムで回す) なので no-node-globals は誤検出。
+    "exclude": ["tests/"]
+  }
+}

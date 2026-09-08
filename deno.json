@@ -1,6 +1,0 @@
-{
-  "//": "deno check 用の設定分離: tsconfig.json は tsc 専用 (lib が deno と非互換)。package.json があると deno が node 互換モードで既定 lib を落とすため、ここで明示する",
-  "compilerOptions": {
-    "lib": ["deno.window"]
-  }
-}

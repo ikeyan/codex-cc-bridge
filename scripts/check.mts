@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // One-command verification: the mock test suite with the driver running under
-// node, deno, and bun, plus both type checkers (deno check and tsc).
+// node, deno, and bun, both type checkers (deno check and tsc), deno fmt/lint,
+// the wiki/ index+health check, and the REVIEW.md upstream-sync check.
 // Run: `npm test` or `node scripts/check.mts`.
 // The test harness itself always runs on node; only the driver-under-test is
 // executed per runtime (that is the portability we ship).
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -22,6 +24,22 @@ interface Step {
   hint?: string;
 }
 
+// plasma-wiki は pyproject.toml / uv.lock で固定した dev 依存。--frozen で lock どおりに実行する。
+const UV_WIKI = ["uv", "run", "--frozen", "wiki"];
+const UV_HINT = "uv が必要です (https://docs.astral.sh/uv/)";
+// 既定のキャッシュ (~/.cache/uv) は Claude sandbox 内では書けず uv が起動時に落ちる。
+// 中身は数個の pure-python wheel なので、常に TMPDIR 下に置いて環境差を無くす。
+const UV_ENV = { UV_CACHE_DIR: path.join(os.tmpdir(), "codex-cc-bridge-uv-cache") };
+
+// REVIEW.md は ikeyan/agent-files のコピー。frontmatter の `source:` (raw URL) を取って diff する。
+// WARN が非空なら drift を警告に留める (CI の PR ジョブ用)。取得失敗と `source:` 欠落は必ず落とす。
+// 各要素は省くと壊れる — 根拠は canon: facts/shell/{trap-exit-replaces-callers-handler,
+// mktemp-tmpdir-handling-bsd-vs-gnu, and-or-list-left-associative, bsd-sed-block-one-liners}。
+const reviewSync = `(f=$(mktemp -p "\${TMPDIR:-/tmp}"); trap 'rm -f "$f"' EXIT; ` +
+  `curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 --retry-connrefused ` +
+  `"$(sed -n '/^source: /{s///p;q;}' REVIEW.md)" -o "$f" && ` +
+  `{ diff -u "$f" REVIEW.md || { [ -n "$WARN" ] && echo 'REVIEW.md: 上流と違う'; }; })`;
+
 const steps: Step[] = [
   { name: "test  driver=node", cmd: ["node", "--test", "tests/codex-turn.test.mjs"] },
   {
@@ -36,12 +54,28 @@ const steps: Step[] = [
     env: { CODEX_TURN_DRIVER_RUNTIME: "bun" },
     hint: "bun が必要です (https://bun.sh)",
   },
-  { name: "types deno check", cmd: ["deno", "check", "scripts/codex-turn.mts", "scripts/check.mts"] },
+  {
+    name: "types deno check",
+    cmd: [
+      "deno",
+      "check",
+      "scripts/codex-turn.mts",
+      "scripts/codex-bridge.mts",
+      "scripts/check.mts",
+    ],
+  },
   {
     name: "types tsc",
     cmd: [tsc, "-p", root],
     hint: "devDependencies が未インストールです: `bun install` か `npm install` を実行してください",
   },
+  { name: "fmt   deno fmt", cmd: ["deno", "fmt", "--check"] },
+  { name: "lint  deno lint", cmd: ["deno", "lint"] },
+  // wiki/ の index と相互リンクは生成物: `wiki update` で作り直せる状態から
+  // ずれていないかを --check で見る (書き込まない)。lint は desc 欠落・リンク切れ等。
+  { name: "wiki  index drift", cmd: [...UV_WIKI, "update", "--check"], env: UV_ENV, hint: UV_HINT },
+  { name: "wiki  lint", cmd: [...UV_WIKI, "lint"], env: UV_ENV, hint: UV_HINT },
+  { name: "sync  REVIEW.md", cmd: ["sh", "-c", reviewSync] },
 ];
 
 interface Result {
@@ -66,8 +100,8 @@ for (const step of steps) {
   const detail = r.error
     ? `${r.error.message}${step.hint ? ` — ${step.hint}` : ""}`
     : ok
-      ? "ok"
-      : `exit ${r.status}`;
+    ? "ok"
+    : `exit ${r.status}`;
   results.push({ step, ok, detail });
 }
 
