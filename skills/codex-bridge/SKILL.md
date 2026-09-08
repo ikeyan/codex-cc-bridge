@@ -38,7 +38,18 @@ Codex を Claude Code から使うための薄い橋。1 セッション 1 常�
 - `sandbox.network.allowLocalBinding`: `true` — app-server の localhost listen 用 (macOS)。
 - `sandbox.filesystem.allowWrite`: `["~/.codex"]`
 - `sandbox.network.allowedDomains`: `["api.openai.com","auth.openai.com","chatgpt.com","*.chatgpt.com"]`
+- **read スコープ (推奨)**: 既定の read はコンピュータ全体で、Codex は `~/.ssh` も読める
+  (= egress の上界)。絞るなら `permissions.blockReadsOutsideWorkingDirectories: true` を置き、
+  `sandbox.filesystem.allowRead` に **`~/.codex`** と **toolchain** (node と codex の実体とバージョン
+  解決に要るもの。asdf なら `~/.asdf` と `~/.tool-versions`、codex が `~/.local/bin` ならそれ) を
+  列挙する。`allowWrite` は read を与えないので `~/.codex` は両方に要る。欠けたときの症状は
+  `codex: command not found` / `No version is set for command node` / `WRITE ~/.codex=BLOCKED`。
+  これで上界は「作業ディレクトリ + `~/.codex` + toolchain」になる (`~/.codex/auth.json` は Codex
+  自身が読めなければならないので残る)。`denyRead` で秘密だけ列挙する方式は toolchain を壊さないが
+  上界は「全体 − 列挙分」のまま。実測: canon `facts/claude-code/sandbox-read-scope-settings-measured`。
 - 認証確認: `codex login status` (未ログインなら ユーザーに `! codex login` を案内)。
+  sandbox 内で `Operation not permitted` と出るなら `~/.codex/auth.json` の read が塞がれている
+  (turn は 401 の無限再試行になるので driver が検知して落とす)。
 - Linux では加えて `socat` が要り、`claude` は非 root ユーザーで動かす (root だと bwrap が
   `uid_map` で落ちる)。挙動は macOS と同じ形で実測済み
   (canon: `facts/claude-code/linux-sandbox-tmp-blocked-like-macos`)。

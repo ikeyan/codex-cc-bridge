@@ -47,8 +47,14 @@ Claude Code sandbox の**既定の read はコンピュータ全体**で (一部
 - `sandbox.filesystem.denyRead` / `allowRead` — 領域単位で塞ぎ、必要な部分だけ開け直す。
 - `sandbox.credentials` — 資格情報ファイルを read 不可にする、または値をマスクする。
 
-このリポジトリの推奨設定はまだ確定していない (`~/.codex` への書込要件と両立するかが未検証)。
-`docs/todo.md` を参照。
+推奨は `permissions.blockReadsOutsideWorkingDirectories: true` + `sandbox.filesystem.allowRead` に
+`~/.codex` と toolchain (node / codex の実体とバージョン解決ファイル) を列挙する形。実測で、
+`blockReads` は home 配下の実行ファイルと `allowWrite` で許した `~/.codex` の書込まで塞ぐので、
+`allowRead` で開け直さないと codex も node も起動しない。これで上界は「作業ディレクトリ +
+`~/.codex` + toolchain」まで縮む。`~/.codex/auth.json` だけは Codex 自身が読めなければならない
+(deny すると turn が 401 の無限再試行になる) ので、Codex が自分の OpenAI トークンを読める点は
+どの設定でも残る。具体的な設定と症状は skill の「前提」、実測は canon
+`facts/claude-code/sandbox-read-scope-settings-measured`。
 
 ## 結局ユーザーが同意しているもの
 
