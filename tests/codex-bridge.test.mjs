@@ -4,13 +4,15 @@
 //   - ready parses the app-server banner, waits for /readyz with a bounded fetch, validates
 //     the port, and publishes it as <dir>/port only after readiness; a dir is bound once
 //   - failures (server exited, no banner, readyz never answers) exit non-zero with a reason
+//   - turn-context finds a thread's rollout by its session_meta.id (not the file name) and
+//     prints its turn_context payloads, optionally one turn's
 import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -162,7 +164,70 @@ test("ready: port that nothing listens on => never answered, not a crash", async
   assert.match(r.stderr, /never answered/);
 });
 
+// A fake $CODEX_HOME with rollouts whose file-name UUID differs from the thread id.
+function fakeCodexHome(rollouts) {
+  const home = scratch();
+  const day = join(home, "sessions", "2026", "09", "08");
+  mkdirSync(day, { recursive: true });
+  for (const [name, lines] of Object.entries(rollouts)) {
+    writeFileSync(join(day, name), lines.join("\n"));
+  }
+  return home;
+}
+const meta = (id) => JSON.stringify({ type: "session_meta", payload: { id, session_id: id } });
+const ctx = (turn_id, model) =>
+  JSON.stringify({
+    type: "turn_context",
+    payload: { turn_id, model, sandbox_policy: { type: "danger-full-access" } },
+  });
+
+test("turn-context: matches the thread by session_meta.id and prints its turn_context payloads", async () => {
+  const home = fakeCodexHome({
+    "rollout-2026-09-08T10-00-00-ffffffff-0000-0000-0000-000000000000.jsonl": [
+      meta("thread-A"),
+      JSON.stringify({ type: "event_msg", payload: {} }),
+      ctx("turn-1", "gpt-5.4-mini"),
+      ctx("turn-2", "gpt-5.4"),
+      '{"type":"turn_context","payload":{"turn_id":"turn-3","mo', // being written
+    ],
+    "rollout-2026-09-08T11-00-00-thread-A.jsonl": [meta("thread-B"), ctx("turn-9", "x")],
+  });
+  const all = await run(["turn-context", "thread-A"], { CODEX_HOME: home });
+  assert.equal(all.code, 0, all.stderr);
+  const out = JSON.parse(all.stdout);
+  assert.match(out.rollout, /ffffffff/);
+  assert.deepEqual(out.turnContexts.map((c) => [c.turn_id, c.model]), [
+    ["turn-1", "gpt-5.4-mini"],
+    ["turn-2", "gpt-5.4"],
+  ]);
+  assert.match(all.stderr, /skipped 1 unparsable/);
+
+  const one = await run(["turn-context", "thread-A", "turn-2"], { CODEX_HOME: home });
+  assert.equal(one.code, 0, one.stderr);
+  assert.deepEqual(JSON.parse(one.stdout).turnContexts.map((c) => c.turn_id), ["turn-2"]);
+
+  const noTurn = await run(["turn-context", "thread-A", "turn-404"], { CODEX_HOME: home });
+  assert.equal(noTurn.code, 1);
+  assert.match(noTurn.stderr, /no turn_context for turn turn-404/);
+
+  const noThread = await run(["turn-context", "thread-Z"], { CODEX_HOME: home });
+  assert.equal(noThread.code, 1);
+  assert.match(noThread.stderr, /no rollout/);
+});
+
+test("turn-context: two rollouts claiming one thread is an error, not a guess", async () => {
+  const home = fakeCodexHome({
+    "rollout-a.jsonl": [meta("thread-A"), ctx("t1", "m")],
+    "rollout-b.jsonl": [meta("thread-A"), ctx("t2", "m")],
+  });
+  const r = await run(["turn-context", "thread-A"], { CODEX_HOME: home });
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /ambiguous/);
+});
+
 test("usage errors exit 2", async () => {
+  assert.equal((await run(["turn-context"])).code, 2);
+  assert.equal((await run(["turn-context", "a", "b", "c"])).code, 2);
   assert.equal((await run([])).code, 2);
   assert.equal((await run(["bogus"])).code, 2);
   assert.equal((await run(["init", "extra"])).code, 2);

@@ -31,7 +31,8 @@ updated: 2026-09-06T07:10:31Z
 
 境界は「**CC (harness) にしかできないか**」で引く。起動レシピのうち skill に残っているのは
 `run_in_background` で app-server を立てる 1 手と、`TaskStop` の扱いだけである。token ファイルの
-生成、起動待ち、ポート抽出、`/readyz` 確認は決定的な手続きなので `codex-bridge.mts` に出した。
+生成、起動待ち、ポート抽出、`/readyz` 確認、rollout からの `turn_context` 取り出しは決定的な
+手続きなので `codex-bridge.mts` に出した。
 
 出す理由は行数ではなく**テストできるかどうか**。Markdown に埋まったシェル片は、正規表現を打ち
 間違えても `mktemp` の mode を忘れても誰も気付かない。コードにすれば `npm test` が毎回見る。

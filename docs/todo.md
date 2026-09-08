@@ -13,6 +13,26 @@
 - 未着手の理由: 「Stop のたびにレビューを走らせる」運用が本当に欲しいかが未検証で、
   hook 設定・plugin.json・失敗時の挙動という可動部品が確実に増えるため。
 
+## turn の駆動を MCP ツールにする (前提 2 点が解けたら)
+
+driver の CLI 層を plugin 同梱の stdio MCP サーバに置き換えると、エージェントの手数は
+「JSON 引数でツールを 1 回呼ぶ」に縮み、シェルも一時ファイルも通らなくなる。実測済みの前提
+(canon `facts/claude-code/mcp-tool-call-backgrounds-cancels-and-runs-unsandboxed`):
+120 秒で background task 化される、TaskStop で `notifications/cancelled` が届く (→ `turn/interrupt`
+を打てる)、MCP サーバは sandbox 外で動く (→ app-server の起動は Bash のまま)。
+
+見送っている理由は、解けていない 2 点が機能と信頼性を落とすため:
+
+- **進捗**: `notifications/progress` は UI に出ない。今の stderr + Monitor に相当する経路
+  (ログファイルのパスを呼び出し前に知らせる取り決め) が要る。
+- **MCP サーバの再起動**: token/port と進行中の結果がメモリにあるので、MCP サーバだけ落ちると
+  生きている app-server に誰も繋げなくなる。永続化すると session dir が戻ってくる。
+
+やるなら順に: lifecycle/security テスト → ws コアを CLI の裏に関数化 → 最小の MCP transport と
+init/ready → 実セッションで launch・background 完了・TaskStop を確認 → 上の 2 点を解決 →
+CLI とランタイム行列を外し wiki 更新。job id・queue・status/result/cancel ツール・完了結果の
+保管・app-server の監督は持ち込まない (Claude が task 寿命、codex が thread 永続を持つ)。
+
 ## sandbox read スコープの推奨設定を確定する
 
 egress の上界は Claude sandbox が Codex に読ませる範囲で決まる

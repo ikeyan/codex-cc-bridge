@@ -43,7 +43,10 @@ codex は thread ごとの記録を `~/.codex/sessions/<年>/<月>/<日>/rollout
 1. turn が `completed` で終わっていること — 実在しないモデルなら API 呼び出しの側で落ちる。
 2. その turn の `turn_context.model` が指定どおりであること。
 
-ファイルは threadId で grep すれば見つかる (`grep -rl <threadId> ~/.codex/sessions`)。
+取り出しは `scripts/codex-bridge.mts turn-context <threadId> [<turnId>]` がやる。rollout の
+ファイル名に入る UUID は threadId と一致するとは限らない (canon) ので、先頭レコード
+`session_meta.payload.id` で構造的に照合し、複数一致は推測せずエラーにする。driver は結果 JSON に
+`turnId` を載せるので、resume で turn が複数ある thread でもその turn の記録だけを引ける。
 
 ## ついでに得られるもの
 

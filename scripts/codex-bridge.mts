@@ -12,10 +12,15 @@
 //   codex-bridge.mts ready DIR FILE  -> wait until the app-server in the background task
 //                                       whose output is FILE is listening and /readyz
 //                                       answers, publish the port as DIR/port, print it
+//   codex-bridge.mts turn-context THREAD [TURN]
+//                                    -> print the turn_context records codex wrote for that
+//                                       thread (the server-side record of the model /
+//                                       sandbox / approval policy each turn actually ran with)
 //
 // Between the two, start the server (see `init`'s printed hint). The DIR is the one
 // value a session carries: the driver takes `--session DIR` and reads both files.
 
+import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -35,7 +40,8 @@ function usage(message?: string): never {
   if (message) console.error(`codex-bridge: ${message}`);
   console.error(
     "usage: codex-bridge.mts init\n" +
-      "       codex-bridge.mts ready <session-dir> <background-task-output-file>",
+      "       codex-bridge.mts ready <session-dir> <background-task-output-file>\n" +
+      "       codex-bridge.mts turn-context <thread-id> [turn-id]",
   );
   process.exit(2);
 }
@@ -131,6 +137,77 @@ async function ready(dir: string, outputFile: string): Promise<void> {
   );
 }
 
+// --- turn-context -------------------------------------------------------------
+// codex writes one rollout jsonl per thread under $CODEX_HOME/sessions/<y>/<m>/<d>/.
+// The file name carries a UUID that is NOT reliably the thread id (canon), so the thread
+// is matched structurally: the first record is session_meta and its payload.id is the
+// thread id. turn_context records then carry what each turn actually ran with.
+const codexHome = process.env.CODEX_HOME ?? path.join(process.env.HOME ?? "", ".codex");
+
+function* rolloutFiles(dir: string): Generator<string> {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) yield* rolloutFiles(p);
+    else if (e.isFile() && /^rollout-.*\.jsonl$/.test(e.name)) yield p;
+  }
+}
+
+/** Thread id from a rollout's first record, or undefined when it is not a session_meta. */
+function rolloutThreadId(file: string): string | undefined {
+  const fd = fs.openSync(file, "r");
+  try {
+    // session_meta is the first line and can be large (it embeds base_instructions).
+    const buf = Buffer.alloc(1 << 20);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    const nl = buf.indexOf(0x0a);
+    if (nl < 0 || nl >= n) return undefined;
+    const rec = JSON.parse(buf.subarray(0, nl).toString("utf8"));
+    return rec?.type === "session_meta" ? rec.payload?.id : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function turnContext(threadId: string, turnId?: string): void {
+  const sessions = path.join(codexHome, "sessions");
+  const matches = [...rolloutFiles(sessions)].filter((f) => rolloutThreadId(f) === threadId);
+  if (matches.length === 0) fail(`no rollout under ${sessions} has session_meta.id ${threadId}`);
+  if (matches.length > 1) {
+    fail(`ambiguous: ${matches.length} rollouts claim thread ${threadId}:\n${matches.join("\n")}`);
+  }
+  const rollout = matches[0];
+  const contexts: unknown[] = [];
+  let unparsable = 0;
+  for (const line of fs.readFileSync(rollout, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let rec: { type?: string; payload?: { turn_id?: string } };
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      unparsable++; // a record still being written, or a truncated tail
+      continue;
+    }
+    if (rec.type !== "turn_context") continue;
+    if (turnId !== undefined && rec.payload?.turn_id !== turnId) continue;
+    contexts.push(rec.payload);
+  }
+  if (turnId !== undefined && contexts.length === 0) {
+    fail(`rollout ${rollout} has no turn_context for turn ${turnId}`);
+  }
+  if (unparsable > 0) {
+    console.error(`codex-bridge: skipped ${unparsable} unparsable line(s) in ${rollout}`);
+  }
+  console.log(JSON.stringify({ rollout, turnContexts: contexts }, null, 2));
+}
+
 const { positionals } = (() => {
   try {
     return parseArgs({ args: process.argv.slice(2), strict: true, allowPositionals: true });
@@ -146,6 +223,9 @@ if (command === "init") {
 } else if (command === "ready") {
   if (rest.length !== 2) usage("ready needs <session-dir> <background-task-output-file>");
   await ready(rest[0], rest[1]);
+} else if (command === "turn-context") {
+  if (rest.length < 1 || rest.length > 2) usage("turn-context needs <thread-id> [turn-id]");
+  turnContext(rest[0], rest[1]);
 } else {
   usage(command === undefined ? "no command" : `unknown command: ${command}`);
 }

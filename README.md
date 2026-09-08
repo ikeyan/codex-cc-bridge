@@ -33,7 +33,8 @@ Claude Code のネイティブ機能 (Background Task・完了通知・Monitor�
 
 - `scripts/codex-turn.mts` — 常駐 app-server (Claude sandbox 内, capability token 認証) に対し
   1 turn / 1 review を駆動する極小 ws クライアント。sandbox は danger-full-access 固定 (fail-closed)。
-- `scripts/codex-bridge.mts` — 起動レシピの機械的な部分 (token 生成 / ポート抽出と readyz 待ち)。
+- `scripts/codex-bridge.mts` — 起動レシピの機械的な部分 (セッションディレクトリと token の生成 /
+  ポート抽出と readyz 待ち) と、rollout からの `turn_context` 取り出し。
 - `commands/codex-task.md`, `commands/codex-review.md` — slash commands。
 - `skills/codex-bridge/SKILL.md` — 起動レシピ・turn 入力の組み方・セキュリティ不変条件。
 - `wiki/` — コードより上位の説明 (アーキテクチャ・ドメイン・セキュリティ)。plasma-wiki 管理。

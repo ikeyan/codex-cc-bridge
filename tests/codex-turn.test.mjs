@@ -218,6 +218,7 @@ test("turn: sandbox pinned to danger-full-access at thread AND turn level", asyn
   const out = JSON.parse(r.stdout);
   assert.equal(out.finalMessage, "MOCK_DONE");
   assert.equal(out.threadId, "thread-1");
+  assert.equal(out.turnId, "turn-1");
   assert.equal(out.turnStatus, "completed");
 });
 

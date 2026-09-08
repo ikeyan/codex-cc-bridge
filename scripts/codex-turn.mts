@@ -667,6 +667,9 @@ console.log(
   JSON.stringify(
     {
       threadId,
+      // The turn id lets `codex-bridge.mts turn-context <thread> <turn>` pick this turn's
+      // server-side record out of a resumed thread's many.
+      turnId: activeTurnId,
       turnStatus: turn.status ?? null,
       turnError: turn.error ?? null,
       finalMessage,
