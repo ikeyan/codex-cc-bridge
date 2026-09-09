@@ -69,8 +69,10 @@ script に出し、判断だけを skill に残す (`wiki/architecture/delegatio
    書き、実測に基づく判断はその実測も書く。
 5. canon に追記した場合は、canon は別リポジトリなのでそちらでも同様にコミットする。
 6. push はユーザーの指示があるまでしない。
-7. **push する前にローカルでレビューを 1 周回す**: `/codex-review --base main` (この橋自身) と Claude の
-   subagent レビューの両方に差分を見せ、指摘を潰してから push する。GitHub 上の Codex は push ごとに
-   全体を再レビューするので、1 件ずつ直して push するとラリーが伸びる。PR のレビュー対応は
-   1 ラウンド分をまとめて 1 push にし、中断や失敗経路のように状態 × トリガーの組合せがある箇所は、
-   直す前に表にして各セルのテストを用意する (1 セルだけ直すと隣のセルが開く)。
+7. **push する前に Claude の subagent レビューを 1 周回す** (GitHub 上の Codex は push ごとに全体を
+   再レビューするので、ローカルで codex-review を回すのは二重作業)。1 件ずつ直して push すると
+   ラリーが伸びるので、PR のレビュー対応は 1 ラウンド分をまとめて 1 push にする。中断や失敗経路の
+   ように状態 × トリガーの組合せがある箇所は、直す前にイベント列の文法と各値の確定条件を書き、
+   各セルのテストを用意する (1 セルだけ直すと隣のセルが開く)。
+8. 待ち・タイムアウト・一度きりの値は node 組み込み (`events.once` + `AbortSignal.timeout`、
+   `timers/promises`、`Promise.withResolvers`) で書く。締切超過は `undefined` でなく例外にする。

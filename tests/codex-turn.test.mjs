@@ -1183,7 +1183,7 @@ test("a 401 before the review child announces itself still waits for and interru
   );
 });
 
-test("a turn/start response slower than the interrupt grace is reported, not silent", async () => {
+test("SIGTERM while turn/start is unanswered waits for that request to settle, then reports", async () => {
   const recorded = [];
   let child;
   const server = await startMockServer((msg, send) => {
@@ -1196,7 +1196,9 @@ test("a turn/start response slower than the interrupt grace is reported, not sil
     appServerBehaviour(recorded)(msg, send);
   });
   const result = new Promise((resolve) => {
-    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {
+      CODEX_BRIDGE_CONTROL_TIMEOUT_MS: "500",
+    });
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d));
     child.on("close", (code) => resolve({ code, stderr }));
@@ -1206,7 +1208,8 @@ test("a turn/start response slower than the interrupt grace is reported, not sil
   const r = await result;
   server.close();
   assert.equal(r.code, 130, r.stderr);
-  assert.match(r.stderr, /did not arrive in time to interrupt/);
+  // The wait ends when the start request settles (its own timeout), not on a guess.
+  assert.match(r.stderr, /never started/);
   assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
 });
 

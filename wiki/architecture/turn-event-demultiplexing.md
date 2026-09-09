@@ -61,15 +61,36 @@ interrupt 応答より先に届いて本経路が結果 JSON を出し終えて�
 `turn/start` の応答待ち中に signal が来た場合は turn id が無いので、最大 3 秒だけ id の到着を
 待ってから interrupt する (review では子 turn の id も同じ猶予で待つ)。abort 進行中や完了後の
 再トリガーは無視する — 完了後に `process.exit` すると stdout に流しかけの結果 JSON が切れる。
-この組合せ (状態: 開始前 / 応答待ち / turn 中 / 完了後 / review で子 id 未知 × トリガー: SIGTERM /
-401 / 再トリガー / ws 切断) を bool フラグと if で書くと、セルを 1 つ直すたびに隣が開く。
-そこで driver は**一度だけ決まる値** (`Once<T>`: 最初の `set` だけが効き、`await` できる) だけで
-状態を持つ: `started` (turn を要求したか)、`turn` (自 turn id)、`child` (子 turn id)、`turnDone`
-(完了通知)、そして `outcome` (完了 / 中断 / 失敗のどれで終わるか)。トリガーはどれも `outcome.set`
-を呼ぶだけで、2 回目以降は自動的に no-op になる (再トリガー・完了後のシグナル・interrupt 応答と
-競合する `turn/completed` に個別の分岐が要らない)。`outcome` を待つ 1 箇所の `switch` が、
-中断なら「`turn` と (review では) `child` を 3 秒まで待ってから子 → 親の順に `turn/interrupt`」を
-行う。`tests/codex-turn.test.mjs` の SIGTERM・401 のテスト群が各セルを pin している。
+この組合せ (状態 × トリガー) を bool フラグと if で書くと、セルを 1 つ直すたびに隣が開く。
+そこで driver は**一度だけ決まる値** = promise だけで状態を持つ (`resolve` は 2 回目以降が no-op
+なので、再トリガー・完了後のシグナル・interrupt 応答と競合する `turn/completed` に個別の分岐が
+要らない)。同期的に読む必要がある値 (turn id によるフィルタ) だけ `Once<T>` (promise + 読み出し) にする。
+
+### イベント列の文法と、各値が決まる時点
+
+driver が自 thread について受け取る列を記号にすると (`S` = start 応答 = 自 turn id、`C` = 子の
+`turn/started`、`I` = `item/completed`、`E` = `error`、`D` = `turn/completed`):
+
+- 通常 turn: `S (I | E)* D`
+- review: `S C (I | E)* D` — ただし `C` は `S` と同じ TCP チャンクで届きうるので、線上では
+  `C S ...` の順に見えることがある (`earlyEvents` に溜めて `S` の後に replay する理由)。
+  実測では `C` は `S` の直後に来る。
+
+これに対して待つ値と、その値が「もう来ない」と確定する条件:
+
+| 値 | 決まる時点 | 来ないと確定する条件 |
+| --- | --- | --- |
+| `turn` (自 turn と thread) | `S` | start 要求が失敗/timeout した = `startSettled` が決まったのに `turn` が空 |
+| `child` (子 turn) | `C` | 自 turn が終わった (`turnDone`)。それ以外は文法上「`S` の直後」なので短い上限で打ち切る (唯一の時間仮定) |
+| `turnDone` | `D` | `outcome` が中断/失敗に決まった (以後は待たない) |
+| `outcome` | `D` / SIGTERM / 401 / ws 切断 / 不正 frame / `reviewThreadId` 不一致 / `run()` の例外 | 必ず決まる |
+
+`outcome` を待つ 1 箇所の `switch` が、中断なら `turn` を (`startSettled` で確定するまで) 待ち、
+review では `child` を上の条件で待ってから、子 → 親の順に `turn/interrupt` を送る。interrupt の
+応答待ちと handshake 待ちは締切超過を例外 (`TimeoutError` / `AbortError`) として扱い、理由を
+出して終了する。待ちは node 組み込み (`events.once` + `AbortSignal.timeout`、`timers/promises`、
+`Promise.withResolvers`) で書き、自前のタイマー管理は持たない。
+`tests/codex-turn.test.mjs` の SIGTERM・401 のテスト群が各セルを pin している。
 
 review では本体が subagent の子 turn で走り、**親 turn だけを interrupt しても子は止まらない**
 (実測: 90 秒走り続けた)。子 turn の id は自分の thread に別 turnId で届く `turn/started` に
