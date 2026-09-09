@@ -1148,6 +1148,68 @@ test("a 401 for a turn that is not ours is ignored", async () => {
   assert.doesNotMatch(r.stderr, /401 Unauthorized/);
 });
 
+test("a 401 before the review child announces itself still waits for and interrupts the child", async () => {
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        send({
+          jsonrpc: "2.0",
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            turnId: "child-turn", // the child's own 401, before its turn/started
+            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+          },
+        });
+        setTimeout(
+          () =>
+            send({
+              jsonrpc: "2.0",
+              method: "turn/started",
+              params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+            }),
+          300,
+        );
+      },
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp", "--review", "uncommitted"], { port: server.port });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.deepEqual(
+    recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
+    ["child-turn", "turn-1"],
+  );
+});
+
+test("a turn/start response slower than the interrupt grace is reported, not silent", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer((msg, send) => {
+    if (msg.method) recorded.push(msg);
+    if (msg.id === undefined) return;
+    if (msg.method === "turn/start") {
+      setTimeout(() => child.kill("SIGTERM"), 50);
+      return; // never answered
+    }
+    appServerBehaviour(recorded)(msg, send);
+  });
+  const result = new Promise((resolve) => {
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.write("x");
+    child.stdin.end();
+  });
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
+  assert.match(r.stderr, /did not arrive in time to interrupt/);
+  assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
+});
+
 test("a 401 from OpenAI mid-turn interrupts and fails instead of waiting forever", async () => {
   const recorded = [];
   const server = await startMockServer(

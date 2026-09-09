@@ -218,7 +218,13 @@ if (!needsTargetFile && opts["target-file"]) {
  * branch name may legally begin or end with Unicode whitespace and trim() would silently
  * retarget the review. */
 function readTargetLine(file: string, what: string): string {
-  const line = fs.readFileSync(file, "utf8").replace(/\r?\n$/, "");
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    usage(`--target-file ${file}: ${(e as Error).message}`);
+  }
+  const line = text.replace(/\r?\n$/, "");
   if (!line || line.includes("\n")) {
     usage(`${file} must hold exactly one non-empty line (the ${what})`);
   }
@@ -243,9 +249,14 @@ else if (reviewMode === "base") {
 // text never passes through a shell (see the skill). No --prompt flag on purpose.
 const prompt = reviewTarget ? undefined : stdinText();
 if (prompt !== undefined && !prompt.trim()) usage("empty prompt (stdin)");
-const outputSchema: unknown = opts.schema
-  ? JSON.parse(fs.readFileSync(opts.schema, "utf8"))
-  : undefined;
+function readSchema(file: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (e) {
+    usage(`--schema ${file}: ${(e as Error).message}`);
+  }
+}
+const outputSchema: unknown = opts.schema ? readSchema(opts.schema) : undefined;
 // Control-plane RPCs (initialize/thread/turn-start) must answer promptly; only
 // waiting for turn *completion* is unbounded. Env override exists for tests; a
 // value that is not a positive number would become setTimeout(NaN) = fire at once.
@@ -351,10 +362,10 @@ function controlRequest<T>(
 }
 
 // --- Lifecycle: values that are decided exactly once -------------------------
-// Everything that used to be a flag (settled / aborting / startRequested / activeTurnId ...)
-// is a value that is set at most once and can be awaited. The first writer wins and later
-// writers are no-ops, so "a second SIGTERM", "a 401 after completion", "turn/completed
-// racing the interrupt response" need no special cases: they are just late `set`s.
+// All lifecycle state is a value that is set at most once and can be awaited. The first
+// writer wins and later writers are no-ops, so "a second SIGTERM", "a 401 after
+// completion", "turn/completed racing the interrupt response" need no special cases: they
+// are just late `set`s.
 
 /** A value that arrives at most once. */
 class Once<T> {
@@ -364,12 +375,11 @@ class Once<T> {
   constructor() {
     this.promise = new Promise<T>((r) => (this.#resolve = r));
   }
-  /** Returns whether this call was the one that set it. */
-  set(value: T): boolean {
-    if (this.#value !== undefined) return false;
+  /** First call wins; later calls are no-ops. */
+  set(value: T): void {
+    if (this.#value !== undefined) return;
     this.#value = { v: value };
     this.#resolve(value);
-    return true;
   }
   get value(): T | undefined {
     return this.#value?.v;
@@ -386,12 +396,13 @@ type Outcome =
 const outcome = new Once<Outcome>();
 
 /** What we own on the server, as it becomes known. `started` marks that a turn (or review)
- * was requested, so an abort before it has nothing to wait for. `turn` is our turn id;
- * `child` the subagent turn a review runs in (measured: interrupting only the parent does
- * not stop it), which announces itself as a turn/started on our thread. */
+ * was requested, so an abort before it has nothing to wait for. `turn` is our turn and the
+ * thread it runs on (normally ours; a review the server moved elsewhere is still ours to
+ * interrupt); `child` the subagent turn a review runs in (measured: interrupting only the
+ * parent does not stop it), which announces itself as a turn/started on our thread. */
 let threadId: string | undefined = opts.thread;
 const started = new Once<true>();
-const turn = new Once<string>();
+const turn = new Once<{ threadId: string; turnId: string }>();
 const child = new Once<string>();
 const turnDone = new Once<TurnCompletedParams>();
 
@@ -456,7 +467,7 @@ function handleServerRequest(msg: IncomingMessage): void {
 // until our turn is identified, then replay through the same handler.
 const earlyEvents: { method: string; params: NotificationParams }[] = [];
 function handleTurnEvent(method: string, params: NotificationParams): void {
-  const ours = turn.value;
+  const ours = turn.value?.turnId;
   if (method === "item/completed") {
     if (params.turnId !== undefined && params.turnId !== ours) return;
     const item = params.item ?? {};
@@ -503,14 +514,21 @@ function handleTurnEvent(method: string, params: NotificationParams): void {
     }
   }
 }
-function turnIdentified(id: string): void {
-  turn.set(id);
+function turnIdentified(thread: string, turnId: string): void {
+  turn.set({ threadId: thread, turnId });
   for (const e of earlyEvents) handleTurnEvent(e.method, e.params);
   earlyEvents.length = 0;
 }
 
 ws.onmessage = (raw: MessageEvent) => {
-  const msg = JSON.parse(String(raw.data)) as IncomingMessage;
+  let msg: IncomingMessage;
+  try {
+    msg = JSON.parse(String(raw.data)) as IncomingMessage;
+  } catch {
+    // A throw here would be an uncaught exception: exit without interrupting the turn.
+    abort("app-server sent a frame that is not JSON; giving up on this connection", 1);
+    return;
+  }
   if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
     const p = pending.get(msg.id);
     if (!p) return;
@@ -556,7 +574,13 @@ process.on("SIGTERM", () => abort("SIGTERM: turn interrupted", 130));
 // (an abort in flight), in which case the throw is simply late.
 
 async function run(): Promise<TurnCompletedParams> {
-  await new Promise((resolve) => (ws.onopen = resolve));
+  const opened = await within(
+    new Promise<true>((resolve) => (ws.onopen = () => resolve(true))),
+    CONTROL_TIMEOUT_MS,
+  );
+  if (opened === undefined) {
+    fail(`no WebSocket handshake from ${url} within ${CONTROL_TIMEOUT_MS}ms`);
+  }
 
   await controlRequest("initialize", {
     clientInfo: { name: "codex-cc-bridge", title: "codex-cc-bridge", version: "0.1.0" },
@@ -690,14 +714,13 @@ async function run(): Promise<TurnCompletedParams> {
       delivery: "inline",
     }).catch((e: Error) => fail(String(e.message ?? e)));
     if (!r.turn?.id) fail("app-server returned no turn id for review/start");
-    turnIdentified(r.turn.id);
     // With delivery "inline" the review runs on the thread we started, and every event
     // arrives on that threadId (measured; "detached" is rejected for thread/start threads).
     // Events for any other thread are filtered out before the early-event buffer sees them,
-    // so a different reviewThreadId could only be waited on forever. The server has already
-    // accepted the review, though, so abort (= interrupt it) rather than just leave.
+    // so a review moved elsewhere could only be waited on forever. The server has already
+    // accepted it, though, so record where it went and abort (= interrupt it there).
+    turnIdentified(r.reviewThreadId ?? threadId, r.turn.id);
     if (r.reviewThreadId !== undefined && r.reviewThreadId !== threadId) {
-      threadId = r.reviewThreadId;
       abort(
         `review/start moved the review to thread ${r.reviewThreadId}; this driver only follows ` +
           "inline reviews on its own thread, so the review is being interrupted",
@@ -719,18 +742,24 @@ async function run(): Promise<TurnCompletedParams> {
       fail(String(e.message ?? e))
     );
     if (!r.turn?.id) fail("app-server returned no turn id for turn/start");
-    turnIdentified(r.turn.id);
+    turnIdentified(threadId, r.turn.id);
   }
   return await turnDone.promise;
 }
 
 // --- Ending -------------------------------------------------------------------
 
-const sleep = (ms: number): Promise<undefined> =>
-  new Promise((r) => setTimeout(() => r(undefined), ms));
-/** `p`, or undefined if it has not resolved within `ms`. */
-const within = <T,>(p: Promise<T>, ms: number): Promise<T | undefined> =>
-  Promise.race([p, sleep(ms)]);
+/** `p`, or undefined if it has not resolved within `ms`. The timer is cleared either way so
+ * a resolved wait does not keep the process alive for the rest of `ms`. */
+function within<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p,
+    new Promise<undefined>((r) => {
+      timer = setTimeout(() => r(undefined), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
 
 /** Interrupt what we own, waiting (bounded) for the ids that may still be in flight: our
  * turn id if the start response is pending, and for a review the child's turn id, which
@@ -740,13 +769,20 @@ async function interruptOwned(): Promise<void> {
   if (started.value === undefined) return; // nothing was requested: nothing to interrupt
   const deadline = Date.now() + 3000;
   const ours = await within(turn.promise, 3000);
-  if (ours === undefined) return;
+  if (ours === undefined) {
+    console.error(
+      "codex-turn: the turn/start response did not arrive in time to interrupt; the server may still run the turn",
+    );
+    return;
+  }
   const kid = reviewMode === undefined
     ? undefined
     : await within(child.promise, Math.max(0, deadline - Date.now()));
-  const targets = [...(kid !== undefined ? [kid] : []), ours];
+  const targets = [...(kid !== undefined ? [kid] : []), ours.turnId];
   const acked = await within(
-    Promise.all(targets.map((turnId) => request("turn/interrupt", { threadId, turnId }))).then(
+    Promise.all(
+      targets.map((turnId) => request("turn/interrupt", { threadId: ours.threadId, turnId })),
+    ).then(
       () => true,
       () => false,
     ),
@@ -789,7 +825,7 @@ switch (result.kind) {
           threadId,
           // The turn id lets `codex-bridge.mts turn-context <thread> <turn>` pick this turn's
           // server-side record out of a resumed thread's many.
-          turnId: turn.value,
+          turnId: turn.value?.turnId,
           // The subagent child turn, if one announced itself: for a review that is where the
           // turn_context lives, so it is the id to give `turn-context` (null otherwise).
           reviewTurnId: child.value ?? null,
