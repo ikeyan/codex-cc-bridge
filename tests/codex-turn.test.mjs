@@ -936,6 +936,67 @@ test("review result carries the child turn id for turn-context", async () => {
   assert.equal(out.reviewTurnId, "child-turn");
 });
 
+test("the 401 explanation survives a turn/completed racing the interrupt response", async () => {
+  const recorded = [];
+  const server = await startMockServer((msg, send) => {
+    if (msg.method) recorded.push(msg);
+    if (msg.id === undefined) return;
+    if (msg.method === "turn/interrupt") {
+      // Real servers emit the interrupted turn's completion; make it land before the
+      // interrupt response so the main path settles first.
+      send({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted", items: [] } },
+      });
+      send({ jsonrpc: "2.0", id: msg.id, result: {} });
+      return;
+    }
+    appServerBehaviour(recorded, {
+      onTurnStart: (s) =>
+        s({
+          jsonrpc: "2.0",
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+          },
+        }),
+    })(msg, send);
+  });
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /401 Unauthorized/);
+});
+
+test("a 401 arriving before the turn/start response still interrupts the turn", async () => {
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      beforeTurnStartResponse: (send) =>
+        send({
+          jsonrpc: "2.0",
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+          },
+        }),
+      onTurnStart: () => {},
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /401 Unauthorized/);
+  assert.deepEqual(findRequest(recorded, "turn/interrupt").params, {
+    threadId: "thread-1",
+    turnId: "turn-1",
+  });
+});
+
 test("a 401 from OpenAI mid-turn interrupts and fails instead of waiting forever", async () => {
   const recorded = [];
   const server = await startMockServer(

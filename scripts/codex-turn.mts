@@ -328,7 +328,6 @@ let activeTurnId: string | null = null;
 // OUR thread with a turn id other than ours. Interrupting only our (parent) turn leaves that
 // child running (measured), so remember it for turn/interrupt.
 let childTurnId: string | null = null;
-let authBailed = false;
 /** Send turn/interrupt for every turn we own: the review child first (interrupting only the
  * parent does not reach it, measured), then our own. Resolves when all have been answered. */
 function interruptAll(): Promise<unknown> {
@@ -489,19 +488,13 @@ ws.onmessage = (raw: MessageEvent) => {
         error?: { codexErrorInfo?: { responseStreamDisconnected?: { httpStatusCode?: number } } };
       })
         .error?.codexErrorInfo?.responseStreamDisconnected?.httpStatusCode;
-      if (status === 401 && !settled && !authBailed) {
-        authBailed = true;
-        // fail() prints only while !settled, so leave settled to it.
-        const bail = (): never =>
-          fail(
-            "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
-              "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
-              "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
-          );
-        if (threadId && activeTurnId) {
-          interruptAll().then(bail, bail);
-          setTimeout(bail, 3000);
-        } else bail();
+      if (status === 401) {
+        abortTurn(
+          "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
+            "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
+            "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
+          1,
+        );
       }
       break;
     }
@@ -510,16 +503,17 @@ ws.onmessage = (raw: MessageEvent) => {
   }
 };
 
-// Best effort: when CC cancels this task, interrupt the resident turn so the
-// app-server does not keep spending tokens / mutating files. If the turn/start
-// response has not arrived yet, wait briefly for the turn ID first.
-function onSignal(signal: string): void {
-  if (settled) process.exit(130);
+// Abort the turn from outside its normal completion: CC cancelling this task (SIGTERM /
+// SIGINT) or a condition that makes waiting pointless (401 from OpenAI). Interrupt the
+// resident turn so the app-server does not keep spending tokens / mutating files. If the
+// turn/start response has not arrived yet, wait briefly for the turn ID first. The reason is
+// printed up front so nothing that races us (a turn/completed for the interrupted turn,
+// which makes the main path print its JSON and settle) can swallow it.
+function abortTurn(reason: string, code: number): void {
+  if (settled) process.exit(code);
   settled = true;
-  const finish = (): never => {
-    console.error(`codex-turn: ${signal}: turn interrupted`);
-    process.exit(130);
-  };
+  console.error(`codex-turn: ${reason}`);
+  const finish = (): never => process.exit(code);
   const interrupt = (): void => {
     // Child first: for a review it is the turn doing the work, and interrupting it also
     // aborts the parent. Interrupting the parent alone does not reach the child.
@@ -543,8 +537,8 @@ function onSignal(signal: string): void {
     finish();
   }
 }
-process.on("SIGINT", () => onSignal("SIGINT"));
-process.on("SIGTERM", () => onSignal("SIGTERM"));
+process.on("SIGINT", () => abortTurn("SIGINT: turn interrupted", 130));
+process.on("SIGTERM", () => abortTurn("SIGTERM: turn interrupted", 130));
 
 await new Promise((resolve) => (ws.onopen = resolve));
 

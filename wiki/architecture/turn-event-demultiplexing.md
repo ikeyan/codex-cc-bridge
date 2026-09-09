@@ -53,7 +53,10 @@ replay** する。バッファは 1 箇所・replay 先は 1 経路に保って�
 
 ## 中断
 
-SIGTERM / SIGINT (= CC の `TaskStop`) を受けたら `turn/interrupt` を送ってから終了する。
+SIGTERM / SIGINT (= CC の `TaskStop`) と、待っても無駄な条件 (OpenAI からの 401 = 認証情報が
+読めないか未ログイン。server は再試行を止めない) は同じ `abortTurn` に入り、理由を先に出力してから
+`turn/interrupt` を送って終了する。理由を先に出すのは、interrupt された turn の `turn/completed` が
+interrupt 応答より先に届いて本経路が結果 JSON を出し終えても、理由が消えないため。
 サーバー側の turn を止めないと、driver が死んだあともトークンを消費し続けファイルを書き換え得るため。
 `turn/start` の応答待ち中に signal が来た場合は turn id が無いので、最大 3 秒だけ id の到着を
 待ってから interrupt する。
