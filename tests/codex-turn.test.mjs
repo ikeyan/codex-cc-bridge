@@ -1183,6 +1183,44 @@ test("a 401 before the review child announces itself still waits for and interru
   );
 });
 
+test("SIGTERM during preflight stops the run before any thread or turn is created", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer((msg, send) => {
+    if (msg.method) recorded.push(msg);
+    if (msg.id === undefined) return;
+    if (msg.method === "command/exec") {
+      // Slow containment probe; the cancel lands while it is pending.
+      setTimeout(() => child.kill("SIGTERM"), 50);
+      setTimeout(
+        () =>
+          send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: { exitCode: 0, stdout: "BLOCKED BLOCKED WRITABLE\n", stderr: "" },
+          }),
+        400,
+      );
+      return;
+    }
+    appServerBehaviour(recorded)(msg, send);
+  });
+  const result = new Promise((resolve) => {
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.write("x");
+    child.stdin.end();
+  });
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
+  assert.match(r.stderr, /nothing to interrupt/);
+  assert.equal(findRequest(recorded, "thread/start"), undefined, "must not go on to start");
+  assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
+});
+
 test("SIGTERM while turn/start is unanswered waits for that request to settle, then reports", async () => {
   const recorded = [];
   let child;
@@ -1208,8 +1246,8 @@ test("SIGTERM while turn/start is unanswered waits for that request to settle, t
   const r = await result;
   server.close();
   assert.equal(r.code, 130, r.stderr);
-  // The wait ends when the start request settles (its own timeout), not on a guess.
-  assert.match(r.stderr, /never started/);
+  // The abort cuts the pending start request short; nothing was started.
+  assert.match(r.stderr, /nothing to interrupt/);
   assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
 });
 

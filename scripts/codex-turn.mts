@@ -356,11 +356,20 @@ function request<T>(method: string, params: unknown): Promise<T> {
   return promise;
 }
 /** request() with a deadline — for control-plane calls that must answer promptly. */
-const controlRequest = <T,>(
+const boundedRequest = <T,>(
   method: string,
   params: unknown,
   timeoutMs = CONTROL_TIMEOUT_MS,
 ): Promise<T> => withTimeout(request<T>(method, params), timeoutMs, method);
+/** boundedRequest() for preflight steps: also gives up as soon as the run's outcome is
+ * decided (an abort during preflight must not go on to create a thread and a turn just to
+ * interrupt them). The start request itself is NOT cut short: once sent, the server may have
+ * accepted the turn, and only its response (or timeout) says whether there is one to stop. */
+const controlRequest = <T,>(
+  method: string,
+  params: unknown,
+  timeoutMs = CONTROL_TIMEOUT_MS,
+): Promise<T> => untilDecided(boundedRequest<T>(method, params, timeoutMs));
 
 // --- Lifecycle: values that are decided exactly once -------------------------
 // All lifecycle state is a value that is set at most once and can be awaited: a promise.
@@ -400,13 +409,24 @@ type Outcome =
   | { kind: "failed"; message: string };
 const outcome = Promise.withResolvers<Outcome>();
 
+/** `p`, unless the run's outcome gets decided first — then a rejection, so whatever step of
+ * run() was waiting stops instead of carrying on after an abort. */
+function untilDecided<T>(p: Promise<T>): Promise<T> {
+  return Promise.race([
+    p,
+    outcome.promise.then(() => {
+      throw new Error("the run ended before this step completed");
+    }),
+  ]);
+}
+
 /** What we own on the server, as it becomes known. `turn` is our turn and the thread it
  * runs on (normally ours; a review the server moved elsewhere is still ours to interrupt);
  * `child` the subagent turn a review runs in (measured: interrupting only the parent does
- * not stop it), which announces itself as a turn/started on our thread. `startSettled` is
- * the start request's settlement: after it, `turn` is either set or never will be. */
+ * not stop it), which announces itself as a turn/started on our thread. `runSettled` is
+ * run() having ended, by success or throw: after it, `turn` is either set or never will be. */
 let threadId: string | undefined = opts.thread;
-const startSettled = new Once<true>();
+const runSettled = new Once<true>();
 const turn = new Once<{ threadId: string; turnId: string }>();
 const child = new Once<string>();
 const turnDone = new Once<TurnCompletedParams>();
@@ -579,9 +599,8 @@ process.on("SIGTERM", () => abort("SIGTERM: turn interrupted", 130));
 // (an abort in flight), in which case the throw is simply late.
 
 async function run(): Promise<TurnCompletedParams> {
-  await once(ws, "open", { signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) }).catch(() =>
-    fail(`no WebSocket handshake from ${url} within ${CONTROL_TIMEOUT_MS}ms`)
-  );
+  await untilDecided(once(ws, "open", { signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) }))
+    .catch(() => fail(`no WebSocket handshake from ${url} within ${CONTROL_TIMEOUT_MS}ms`));
 
   await controlRequest("initialize", {
     clientInfo: { name: "codex-cc-bridge", title: "codex-cc-bridge", version: "0.1.0" },
@@ -707,48 +726,42 @@ async function run(): Promise<TurnCompletedParams> {
     effort: resolved?.reasoningEffort ?? null,
   });
 
-  // `startSettled` must come after `turn` is recorded (or after the request failed): an
-  // abort races the two to learn whether there is anything to interrupt.
-  try {
-    if (reviewTarget) {
-      const r = await controlRequest<ReviewStartResponse>("review/start", {
-        threadId,
-        target: reviewTarget,
-        delivery: "inline",
-      }).catch((e: Error) => fail(String(e.message ?? e)));
-      if (!r.turn?.id) fail("app-server returned no turn id for review/start");
-      // With delivery "inline" the review runs on the thread we started, and every event
-      // arrives on that threadId (measured; "detached" is rejected for thread/start threads).
-      // Events for any other thread are filtered out before the early-event buffer sees them,
-      // so a review moved elsewhere could only be waited on forever. The server has already
-      // accepted it, though, so record where it went and abort (= interrupt it there).
-      turnIdentified(r.reviewThreadId ?? threadId, r.turn.id);
-      if (r.reviewThreadId !== undefined && r.reviewThreadId !== threadId) {
-        abort(
-          `review/start moved the review to thread ${r.reviewThreadId}; this driver only follows ` +
-            "inline reviews on its own thread, so the review is being interrupted",
-          1,
-        );
-        return new Promise<never>(() => {});
-      }
-    } else {
-      const params: Record<string, unknown> = {
-        threadId,
-        input: [{ type: "text", text: prompt }],
-        sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
-        approvalPolicy: PINNED_APPROVAL_POLICY,
-      };
-      if (outputSchema !== undefined) params.outputSchema = outputSchema;
-      if (opts.model) params.model = opts.model;
-      if (opts.effort) params.effort = opts.effort;
-      const r = await controlRequest<TurnStartResponse>("turn/start", params).catch((e: Error) =>
-        fail(String(e.message ?? e))
+  if (reviewTarget) {
+    const r = await boundedRequest<ReviewStartResponse>("review/start", {
+      threadId,
+      target: reviewTarget,
+      delivery: "inline",
+    }).catch((e: Error) => fail(String(e.message ?? e)));
+    if (!r.turn?.id) fail("app-server returned no turn id for review/start");
+    // With delivery "inline" the review runs on the thread we started, and every event
+    // arrives on that threadId (measured; "detached" is rejected for thread/start threads).
+    // Events for any other thread are filtered out before the early-event buffer sees them,
+    // so a review moved elsewhere could only be waited on forever. The server has already
+    // accepted it, though, so record where it went and abort (= interrupt it there).
+    turnIdentified(r.reviewThreadId ?? threadId, r.turn.id);
+    if (r.reviewThreadId !== undefined && r.reviewThreadId !== threadId) {
+      abort(
+        `review/start moved the review to thread ${r.reviewThreadId}; this driver only follows ` +
+          "inline reviews on its own thread, so the review is being interrupted",
+        1,
       );
-      if (!r.turn?.id) fail("app-server returned no turn id for turn/start");
-      turnIdentified(threadId, r.turn.id);
+      return new Promise<never>(() => {});
     }
-  } finally {
-    startSettled.set(true);
+  } else {
+    const params: Record<string, unknown> = {
+      threadId,
+      input: [{ type: "text", text: prompt }],
+      sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
+      approvalPolicy: PINNED_APPROVAL_POLICY,
+    };
+    if (outputSchema !== undefined) params.outputSchema = outputSchema;
+    if (opts.model) params.model = opts.model;
+    if (opts.effort) params.effort = opts.effort;
+    const r = await boundedRequest<TurnStartResponse>("turn/start", params).catch((e: Error) =>
+      fail(String(e.message ?? e))
+    );
+    if (!r.turn?.id) fail("app-server returned no turn id for turn/start");
+    turnIdentified(threadId, r.turn.id);
   }
   return await turnDone.promise;
 }
@@ -757,15 +770,14 @@ async function run(): Promise<TurnCompletedParams> {
 
 /** Interrupt what we own, child first (interrupting the parent alone does not reach it,
  * measured). Each wait ends when the grammar says the value is decided, not on a guess:
- * `turn` once the start request has settled; `child` once it announces itself or our turn
+ * `turn` once run() has ended (a decided outcome cuts run() short, so this is prompt);
+ * `child` once it announces itself or our turn
  * is over — plus a short bound, since a child that is coming does so right after the start
  * response. Throws when the interrupt could not be confirmed. */
 async function interruptOwned(): Promise<void> {
-  await Promise.race([turn.promise, startSettled.promise]);
+  await Promise.race([turn.promise, runSettled.promise]);
   const ours = turn.value;
-  if (ours === undefined) {
-    throw new Error("the turn was never started (start request failed or is still pending)");
-  }
+  if (ours === undefined) throw new Error("no turn was started, so there is nothing to interrupt");
   const kid = reviewMode === undefined ? undefined : await Promise.race([
     child.promise,
     turnDone.promise.then(() => undefined),
@@ -781,10 +793,12 @@ async function interruptOwned(): Promise<void> {
   );
 }
 
-run().then(
-  (params) => outcome.resolve({ kind: "completed", params }),
-  (e: Error) => outcome.resolve({ kind: "failed", message: String(e?.message ?? e) }),
-);
+run()
+  .then(
+    (params) => outcome.resolve({ kind: "completed", params }),
+    (e: Error) => outcome.resolve({ kind: "failed", message: String(e?.message ?? e) }),
+  )
+  .finally(() => runSettled.set(true));
 const result = await outcome.promise;
 switch (result.kind) {
   case "failed":
