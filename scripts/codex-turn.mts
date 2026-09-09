@@ -323,53 +323,6 @@ interface PendingRequest {
   method: string;
 }
 const pending = new Map<number, PendingRequest>();
-let threadId: string | undefined = opts.thread;
-let activeTurnId: string | null = null;
-// review/start runs the review in a subagent child turn; its id arrives as a turn/started on
-// OUR thread with a turn id other than ours. Interrupting only our (parent) turn leaves that
-// child running (measured), so remember it for turn/interrupt.
-let childTurnId: string | null = null;
-/** Send turn/interrupt for every turn we own: the review child first (interrupting only the
- * parent does not reach it, measured), then our own. Resolves when all have been answered. */
-function interruptAll(): Promise<unknown> {
-  const targets = [...(childTurnId ? [childTurnId] : []), activeTurnId];
-  return Promise.all(targets.map((turnId) => request("turn/interrupt", { threadId, turnId })));
-}
-let startRequested = false;
-let finalAnswer: string | null = null;
-let lastAgentMessage: string | null = null;
-let usageInfo: unknown = null;
-let settled = false;
-let resolveTurn!: (params: TurnCompletedParams) => void;
-const turnDone = new Promise<TurnCompletedParams>((r) => (resolveTurn = r));
-
-function fail(message: string, code = 1): never {
-  if (!settled) {
-    settled = true;
-    console.error(`codex-turn: ${message}`);
-  }
-  process.exit(code);
-}
-
-ws.onerror = () => {
-  if (settled) return;
-  fail(
-    `cannot reach app-server at ${url} (not running, or it rejected the handshake).\n` +
-      `- If http://127.0.0.1:${port}/readyz succeeds, the server is up but the token does not match\n` +
-      `  (session ${sessionDir} points at another session's server; run the launch recipe again).\n` +
-      `- Otherwise the server died: start a new one with the launch recipe (fresh init + ready).`,
-  );
-};
-ws.onclose = () => {
-  if (!settled) fail("app-server connection closed before the turn completed");
-  else if (aborting) {
-    // fail() is muted once settled; say what happened to the interrupt we were waiting on.
-    console.error(
-      "codex-turn: app-server connection closed before turn/interrupt was acknowledged; the server turn may still be running",
-    );
-    process.exit(abortCode);
-  }
-};
 
 const send = (msg: object): void => ws.send(JSON.stringify(msg));
 function request<T>(method: string, params: unknown): Promise<T> {
@@ -397,6 +350,84 @@ function controlRequest<T>(
   ]).finally(() => clearTimeout(timer));
 }
 
+// --- Lifecycle: values that are decided exactly once -------------------------
+// Everything that used to be a flag (settled / aborting / startRequested / activeTurnId ...)
+// is a value that is set at most once and can be awaited. The first writer wins and later
+// writers are no-ops, so "a second SIGTERM", "a 401 after completion", "turn/completed
+// racing the interrupt response" need no special cases: they are just late `set`s.
+
+/** A value that arrives at most once. */
+class Once<T> {
+  readonly promise: Promise<T>;
+  #resolve!: (value: T) => void;
+  #value: { v: T } | undefined;
+  constructor() {
+    this.promise = new Promise<T>((r) => (this.#resolve = r));
+  }
+  /** Returns whether this call was the one that set it. */
+  set(value: T): boolean {
+    if (this.#value !== undefined) return false;
+    this.#value = { v: value };
+    this.#resolve(value);
+    return true;
+  }
+  get value(): T | undefined {
+    return this.#value?.v;
+  }
+}
+
+/** How this driver run ends. Set from wherever the ending is decided; acted on in one place. */
+type Outcome =
+  | { kind: "completed"; params: TurnCompletedParams }
+  /** Interrupt whatever we own on the server (bounded), then exit with `code`. */
+  | { kind: "aborted"; reason: string; code: number }
+  /** Nothing to interrupt (or no connection to do it over): report and exit 1. */
+  | { kind: "failed"; message: string };
+const outcome = new Once<Outcome>();
+
+/** What we own on the server, as it becomes known. `started` marks that a turn (or review)
+ * was requested, so an abort before it has nothing to wait for. `turn` is our turn id;
+ * `child` the subagent turn a review runs in (measured: interrupting only the parent does
+ * not stop it), which announces itself as a turn/started on our thread. */
+let threadId: string | undefined = opts.thread;
+const started = new Once<true>();
+const turn = new Once<string>();
+const child = new Once<string>();
+const turnDone = new Once<TurnCompletedParams>();
+
+let finalAnswer: string | null = null;
+let lastAgentMessage: string | null = null;
+let usageInfo: unknown = null;
+
+/** Abort the run: the resident turn is interrupted (bounded) before exiting. */
+const abort = (reason: string, code: number): void => {
+  outcome.set({ kind: "aborted", reason, code });
+};
+/** End the run without interrupting anything (used inside run(), where it also stops it). */
+function fail(message: string): never {
+  throw new Error(message);
+}
+
+ws.onerror = () => {
+  outcome.set({
+    kind: "failed",
+    message: `cannot reach app-server at ${url} (not running, or it rejected the handshake).\n` +
+      `- If http://127.0.0.1:${port}/readyz succeeds, the server is up but the token does not match\n` +
+      `  (session ${sessionDir} points at another session's server; run the launch recipe again).\n` +
+      `- Otherwise the server died: start a new one with the launch recipe (fresh init + ready).`,
+  });
+};
+ws.onclose = () => {
+  outcome.set({
+    kind: "failed",
+    message: "app-server connection closed before the turn completed",
+  });
+  // Anything still waiting on the server (an interrupt in flight, a control request) gets a
+  // definite answer instead of hanging.
+  for (const p of pending.values()) p.reject(new Error(`${p.method}: connection closed`));
+  pending.clear();
+};
+
 // Schema-valid denials per server->client request method (fail closed).
 // These should never fire with approvalPolicy "never", but if they do, deny.
 const DENIALS: Record<string, object> = {
@@ -421,12 +452,13 @@ function handleServerRequest(msg: IncomingMessage): void {
 }
 
 // Turn-scoped events can arrive in the same TCP chunk as the turn/start
-// response, i.e. before the awaited response assigns activeTurnId. Buffer them
+// response, i.e. before the awaited response assigns our turn id. Buffer them
 // until our turn is identified, then replay through the same handler.
 const earlyEvents: { method: string; params: NotificationParams }[] = [];
 function handleTurnEvent(method: string, params: NotificationParams): void {
+  const ours = turn.value;
   if (method === "item/completed") {
-    if (params.turnId !== undefined && params.turnId !== activeTurnId) return;
+    if (params.turnId !== undefined && params.turnId !== ours) return;
     const item = params.item ?? {};
     if (item.type === "agentMessage") {
       if (item.phase === "final_answer") finalAnswer = item.text ?? "";
@@ -440,30 +472,29 @@ function handleTurnEvent(method: string, params: NotificationParams): void {
   } else if (method === "turn/completed") {
     // Only accept the completion of the turn we started; anything else
     // (concurrent drivers, child turns) is not ours.
-    if (params.turn?.id !== activeTurnId) return;
-    resolveTurn(params);
+    if (params.turn?.id !== ours) return;
+    turnDone.set(params);
   } else if (method === "turn/started") {
-    // A turn on our thread that is not ours: the subagent child a review runs in. Kept
-    // only so interrupts can reach it and the result can name it (reviewTurnId).
+    // A turn on our thread that is not ours: the subagent child a review runs in.
     const id = params.turn?.id;
-    if (id !== undefined && id !== activeTurnId) childTurnId = id;
+    if (id !== undefined && id !== ours) child.set(id);
   } else if (method === "error") {
     // Ours if it names our turn or the review child, or names no turn (thread-level). A
     // review's child may not be identified yet, so accept unknown turn ids in that window.
     const t = params.turnId;
-    const ours = t === undefined || t === activeTurnId || t === childTurnId ||
-      (reviewMode !== undefined && childTurnId === null);
-    if (!ours) return;
+    const mine = t === undefined || t === ours || t === child.value ||
+      (reviewMode !== undefined && child.value === undefined);
+    if (!mine) return;
     progress("error", { detail: params });
     // Codex cannot authenticate to OpenAI (auth.json unreadable under a read-restricted
     // sandbox, or logged out): the server retries forever and the turn never completes
-    // (measured), so waiting is pointless. Interrupt and say why.
+    // (measured), so waiting is pointless.
     const status = (params as {
       error?: { codexErrorInfo?: { responseStreamDisconnected?: { httpStatusCode?: number } } };
     })
       .error?.codexErrorInfo?.responseStreamDisconnected?.httpStatusCode;
     if (status === 401) {
-      abortTurn(
+      abort(
         "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
           "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
           "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
@@ -472,7 +503,8 @@ function handleTurnEvent(method: string, params: NotificationParams): void {
     }
   }
 }
-function turnIdentified(): void {
+function turnIdentified(id: string): void {
+  turn.set(id);
   for (const e of earlyEvents) handleTurnEvent(e.method, e.params);
   earlyEvents.length = 0;
 }
@@ -503,10 +535,9 @@ ws.onmessage = (raw: MessageEvent) => {
     case "turn/completed":
     case "turn/started":
     case "error":
-      // turn/started and error included: both are filtered by turn id, and both can share a
-      // TCP chunk with the turn/start (review/start) response, i.e. arrive before
-      // activeTurnId is known.
-      if (activeTurnId === null) earlyEvents.push({ method: msg.method, params });
+      // All four are filtered by turn id, and all can share a TCP chunk with the
+      // turn/start (review/start) response, i.e. arrive before our turn id is known.
+      if (turn.value === undefined) earlyEvents.push({ method: msg.method, params });
       else handleTurnEvent(msg.method, params);
       break;
     case "thread/tokenUsage/updated":
@@ -517,236 +548,264 @@ ws.onmessage = (raw: MessageEvent) => {
   }
 };
 
-// Abort the turn from outside its normal completion: CC cancelling this task (SIGTERM /
-// SIGINT) or a condition that makes waiting pointless (401 from OpenAI). Interrupt the
-// resident turn so the app-server does not keep spending tokens / mutating files. If the
-// turn/start response has not arrived yet, wait briefly for the turn ID first. The reason is
-// printed up front so nothing that races us (a turn/completed for the interrupted turn,
-// which makes the main path print its JSON and settle) can swallow it.
-let aborting = false;
-let abortCode = 1;
-function abortTurn(reason: string, code: number): void {
-  // A second trigger while an abort is in flight (the server keeps emitting 401s; a second
-  // signal) must not cut the turn-id wait / interrupt grace short: ignore it. After the turn
-  // has settled the process is already on its way out (result JSON draining to stdout); an
-  // exit() here could truncate that JSON, so ignore the trigger then too.
-  if (aborting || settled) return;
-  aborting = true;
-  abortCode = code;
-  settled = true;
-  console.error(`codex-turn: ${reason}`);
-  const finish = (): never => process.exit(code);
-  if (!startRequested) finish();
-  // Wait (bounded) until we know what to interrupt: our turn id, and for a review also the
-  // child's, which arrives as a turn/started shortly after the review/start response.
-  const deadline = Date.now() + 3000;
-  const tick = (): void => {
-    const known = threadId && activeTurnId && (reviewMode === undefined || childTurnId !== null);
-    if (!known && Date.now() < deadline) return;
-    clearInterval(poll);
-    if (threadId && activeTurnId) {
-      interruptAll().then(finish, finish);
-      setTimeout(finish, 3000);
-    } else finish();
-  };
-  const poll = setInterval(tick, 50);
-  tick();
-}
-process.on("SIGINT", () => abortTurn("SIGINT: turn interrupted", 130));
-process.on("SIGTERM", () => abortTurn("SIGTERM: turn interrupted", 130));
+process.on("SIGINT", () => abort("SIGINT: turn interrupted", 130));
+process.on("SIGTERM", () => abort("SIGTERM: turn interrupted", 130));
 
-await new Promise((resolve) => (ws.onopen = resolve));
+// --- The run: connect, prove containment, start the turn, wait for it ----------
+// Throwing anywhere here ends the run as "failed" unless the outcome was already decided
+// (an abort in flight), in which case the throw is simply late.
 
-await controlRequest("initialize", {
-  clientInfo: { name: "codex-cc-bridge", title: "codex-cc-bridge", version: "0.1.0" },
-  capabilities: {
-    optOutNotificationMethods: [
-      "item/agentMessage/delta",
-      "item/reasoning/summaryTextDelta",
-      "item/reasoning/summaryPartAdded",
-      "item/reasoning/textDelta",
-      "item/commandExecution/outputDelta",
-    ],
-  },
-}).catch((e: Error) => fail(String(e.message ?? e)));
-send({ jsonrpc: "2.0", method: "initialized", params: {} });
+async function run(): Promise<TurnCompletedParams> {
+  await new Promise((resolve) => (ws.onopen = resolve));
 
-// --- Containment preflight -------------------------------------------------
-// command/exec runs in the server's own context (no thread, no model, no
-// tokens). A server inside the Claude sandbox cannot write $HOME or /tmp
-// (only sandbox-designated subtrees like /tmp/claude*); a server inside *this*
-// session's sandbox can write the target cwd. Anything else means we are
-// talking to the wrong server: abort before starting any thread.
-{
-  const probeName = `.codex-cc-bridge-probe-${process.pid}-${Math.floor(Math.random() * 1e9)}`;
-  const probeWrite = (dir: string, label: string): string =>
-    `${label}=BLOCKED; if touch "${dir}/${probeName}" 2>/dev/null; then ${label}=WRITABLE; rm -f "${dir}/${probeName}"; fi; `;
-  const script = probeWrite("$HOME", "home") +
-    probeWrite("/tmp", "tmp") +
-    probeWrite(".", "cwdw") +
-    `echo "$home $tmp $cwdw"`;
-  const probe = await controlRequest<CommandExecResponse>(
-    "command/exec",
-    {
-      command: ["/bin/sh", "-c", script],
-      cwd,
-      // Without this, command/exec applies the user's configured codex sandbox,
-      // which dies on nested Seatbelt inside the Claude sandbox (exit 71).
-      sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
-      timeoutMs: PROBE_TIMEOUT_MS - 5000,
+  await controlRequest("initialize", {
+    clientInfo: { name: "codex-cc-bridge", title: "codex-cc-bridge", version: "0.1.0" },
+    capabilities: {
+      optOutNotificationMethods: [
+        "item/agentMessage/delta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/summaryPartAdded",
+        "item/reasoning/textDelta",
+        "item/commandExecution/outputDelta",
+      ],
     },
-    PROBE_TIMEOUT_MS,
-  ).catch((e: Error) =>
-    fail(`containment probe failed (refusing to run a turn): ${e.message ?? e}`)
-  );
-  if (probe.exitCode !== 0) {
-    fail(
-      `containment probe did not run cleanly (exit ${probe.exitCode}, stderr: ${
-        String(probe.stderr ?? "").trim()
-      }). Refusing to run a turn.`,
-    );
-  }
-  const fields = String(probe.stdout ?? "").trim().split(/\s+/);
-  // Three known words or nothing: anything else is a broken probe, not a verdict.
-  if (fields.length !== 3 || !fields.every((f) => f === "BLOCKED" || f === "WRITABLE")) {
-    fail(
-      `containment probe output not understood (stdout: ${JSON.stringify(probe.stdout)}, ` +
-        `stderr: ${JSON.stringify(probe.stderr)}). Refusing to run a turn.`,
-    );
-  }
-  const [home, tmp, cwdw] = fields;
-  if (home !== "BLOCKED" || tmp !== "BLOCKED") {
-    fail(
-      `REFUSING TO RUN: the app-server at ${url} can write ${
-        home !== "BLOCKED" ? "$HOME" : "/tmp"
-      }, ` +
-        "so it is NOT confined by the Claude sandbox.\n" +
-        "Kill it and restart it from a sandboxed (run_in_background) Bash: codex app-server --listen " +
-        url,
-    );
-  }
-  if (cwdw !== "WRITABLE") {
-    fail(
-      `REFUSING TO RUN: the app-server at ${url} cannot write ${cwd}.\n` +
-        "It is probably confined by a different session's sandbox. Start one for this session on another port.",
-    );
-  }
-  progress("containment", { home: "BLOCKED", tmp: "BLOCKED", cwd: "WRITABLE" });
-}
-// ---------------------------------------------------------------------------
+  }).catch((e: Error) => fail(String(e.message ?? e)));
+  send({ jsonrpc: "2.0", method: "initialized", params: {} });
 
-let resolved: ThreadResponse | undefined;
-if (threadId) {
-  const r = await controlRequest<ThreadResponse>("thread/resume", {
-    threadId,
-    cwd,
-    sandbox: PINNED_THREAD_SANDBOX,
-    approvalPolicy: PINNED_APPROVAL_POLICY,
-    developerInstructions: DEVELOPER_INSTRUCTIONS,
-    ...(opts.model ? { model: opts.model } : {}),
-  }).catch((e: Error) => {
-    // Another client holds the thread open: measured cause is the ChatGPT app's remote
-    // control resuming bridge threads on its own app-server (canon:
-    // facts/codex/thread-resume-blocked-by-other-writer-client). Nothing here can
-    // release it; say so instead of leaving a bare -32600.
-    if (String(e.message).includes("already has an active writer")) {
+  // --- Containment preflight -------------------------------------------------
+  // command/exec runs in the server's own context (no thread, no model, no
+  // tokens). A server inside the Claude sandbox cannot write $HOME or /tmp
+  // (only sandbox-designated subtrees like /tmp/claude*); a server inside *this*
+  // session's sandbox can write the target cwd. Anything else means we are
+  // talking to the wrong server: abort before starting any thread.
+  {
+    const probeName = `.codex-cc-bridge-probe-${process.pid}-${Math.floor(Math.random() * 1e9)}`;
+    const probeWrite = (dir: string, label: string): string =>
+      `${label}=BLOCKED; if touch "${dir}/${probeName}" 2>/dev/null; then ${label}=WRITABLE; rm -f "${dir}/${probeName}"; fi; `;
+    const script = probeWrite("$HOME", "home") +
+      probeWrite("/tmp", "tmp") +
+      probeWrite(".", "cwdw") +
+      `echo "$home $tmp $cwdw"`;
+    const probe = await controlRequest<CommandExecResponse>(
+      "command/exec",
+      {
+        command: ["/bin/sh", "-c", script],
+        cwd,
+        // Without this, command/exec applies the user's configured codex sandbox,
+        // which dies on nested Seatbelt inside the Claude sandbox (exit 71).
+        sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
+        timeoutMs: PROBE_TIMEOUT_MS - 5000,
+      },
+      PROBE_TIMEOUT_MS,
+    ).catch((e: Error) =>
+      fail(`containment probe failed (refusing to run a turn): ${e.message ?? e}`)
+    );
+    if (probe.exitCode !== 0) {
       fail(
-        `thread ${threadId} is held open by another codex client (typically the ChatGPT app's ` +
-          "remote control, which can resume non-ephemeral threads). Close it there, or drop " +
-          `--thread and start a new thread.\n(${e.message})`,
+        `containment probe did not run cleanly (exit ${probe.exitCode}, stderr: ${
+          String(probe.stderr ?? "").trim()
+        }). Refusing to run a turn.`,
       );
     }
-    fail(String(e.message ?? e));
-  });
-  threadId = r.thread?.id ?? threadId;
-  resolved = r;
-} else {
-  const r = await controlRequest<ThreadResponse>("thread/start", {
-    cwd,
-    sandbox: PINNED_THREAD_SANDBOX,
-    approvalPolicy: PINNED_APPROVAL_POLICY,
-    developerInstructions: DEVELOPER_INSTRUCTIONS,
-    ephemeral: false,
-    ...(opts.model ? { model: opts.model } : {}),
-  }).catch((e: Error) => fail(String(e.message ?? e)));
-  threadId = r.thread?.id;
-  resolved = r;
-}
-if (!threadId) fail("app-server returned no thread id");
-// Report what the server resolved, not what we asked for: the only in-band evidence of
-// which model the thread runs. Note the server echoes an unknown name back unchanged --
-// this proves the parameter was accepted, not that the model exists.
-progress("thread", {
-  threadId,
-  model: resolved?.model ?? null,
-  effort: resolved?.reasoningEffort ?? null,
-});
-
-startRequested = true;
-if (reviewTarget) {
-  const r = await controlRequest<ReviewStartResponse>("review/start", {
+    const fields = String(probe.stdout ?? "").trim().split(/\s+/);
+    // Three known words or nothing: anything else is a broken probe, not a verdict.
+    if (fields.length !== 3 || !fields.every((f) => f === "BLOCKED" || f === "WRITABLE")) {
+      fail(
+        `containment probe output not understood (stdout: ${JSON.stringify(probe.stdout)}, ` +
+          `stderr: ${JSON.stringify(probe.stderr)}). Refusing to run a turn.`,
+      );
+    }
+    const [home, tmp, cwdw] = fields;
+    if (home !== "BLOCKED" || tmp !== "BLOCKED") {
+      fail(
+        `REFUSING TO RUN: the app-server at ${url} can write ${
+          home !== "BLOCKED" ? "$HOME" : "/tmp"
+        }, ` +
+          "so it is NOT confined by the Claude sandbox.\n" +
+          "Kill it and restart it from a sandboxed (run_in_background) Bash: codex app-server --listen " +
+          url,
+      );
+    }
+    if (cwdw !== "WRITABLE") {
+      fail(
+        `REFUSING TO RUN: the app-server at ${url} cannot write ${cwd}.\n` +
+          "It is probably confined by a different session's sandbox. Start one for this session on another port.",
+      );
+    }
+    progress("containment", { home: "BLOCKED", tmp: "BLOCKED", cwd: "WRITABLE" });
+  }
+  // ---------------------------------------------------------------------------
+  let resolved: ThreadResponse | undefined;
+  if (threadId) {
+    const r = await controlRequest<ThreadResponse>("thread/resume", {
+      threadId,
+      cwd,
+      sandbox: PINNED_THREAD_SANDBOX,
+      approvalPolicy: PINNED_APPROVAL_POLICY,
+      developerInstructions: DEVELOPER_INSTRUCTIONS,
+      ...(opts.model ? { model: opts.model } : {}),
+    }).catch((e: Error) => {
+      // Another client holds the thread open: measured cause is the ChatGPT app's remote
+      // control resuming bridge threads on its own app-server (canon:
+      // facts/codex/thread-resume-blocked-by-other-writer-client). Nothing here can
+      // release it; say so instead of leaving a bare -32600.
+      if (String(e.message).includes("already has an active writer")) {
+        fail(
+          `thread ${threadId} is held open by another codex client (typically the ChatGPT app's ` +
+            "remote control, which can resume non-ephemeral threads). Close it there, or drop " +
+            `--thread and start a new thread.\n(${e.message})`,
+        );
+      }
+      fail(String(e.message ?? e));
+    });
+    threadId = r.thread?.id ?? threadId;
+    resolved = r;
+  } else {
+    const r = await controlRequest<ThreadResponse>("thread/start", {
+      cwd,
+      sandbox: PINNED_THREAD_SANDBOX,
+      approvalPolicy: PINNED_APPROVAL_POLICY,
+      developerInstructions: DEVELOPER_INSTRUCTIONS,
+      ephemeral: false,
+      ...(opts.model ? { model: opts.model } : {}),
+    }).catch((e: Error) => fail(String(e.message ?? e)));
+    threadId = r.thread?.id;
+    resolved = r;
+  }
+  if (!threadId) fail("app-server returned no thread id");
+  // Report what the server resolved, not what we asked for: the only in-band evidence of
+  // which model the thread runs. Note the server echoes an unknown name back unchanged --
+  // this proves the parameter was accepted, not that the model exists.
+  progress("thread", {
     threadId,
-    target: reviewTarget,
-    delivery: "inline",
-  }).catch((e: Error) => fail(String(e.message ?? e)));
-  if (!r.turn?.id) fail("app-server returned no turn id for review/start");
-  // With delivery "inline" the review runs on the thread we started, and every event
-  // arrives on that threadId (measured; "detached" is rejected for thread/start threads).
-  // Events for any other thread are filtered out before the early-event buffer sees them,
-  // so a different reviewThreadId could only be waited on forever: refuse instead.
-  if (r.reviewThreadId !== undefined && r.reviewThreadId !== threadId) {
-    fail(
-      `review/start moved the review to thread ${r.reviewThreadId} (ours is ${threadId}); ` +
-        "this driver only follows inline reviews on its own thread",
+    model: resolved?.model ?? null,
+    effort: resolved?.reasoningEffort ?? null,
+  });
+
+  started.set(true);
+  if (reviewTarget) {
+    const r = await controlRequest<ReviewStartResponse>("review/start", {
+      threadId,
+      target: reviewTarget,
+      delivery: "inline",
+    }).catch((e: Error) => fail(String(e.message ?? e)));
+    if (!r.turn?.id) fail("app-server returned no turn id for review/start");
+    turnIdentified(r.turn.id);
+    // With delivery "inline" the review runs on the thread we started, and every event
+    // arrives on that threadId (measured; "detached" is rejected for thread/start threads).
+    // Events for any other thread are filtered out before the early-event buffer sees them,
+    // so a different reviewThreadId could only be waited on forever. The server has already
+    // accepted the review, though, so abort (= interrupt it) rather than just leave.
+    if (r.reviewThreadId !== undefined && r.reviewThreadId !== threadId) {
+      threadId = r.reviewThreadId;
+      abort(
+        `review/start moved the review to thread ${r.reviewThreadId}; this driver only follows ` +
+          "inline reviews on its own thread, so the review is being interrupted",
+        1,
+      );
+      return new Promise<never>(() => {});
+    }
+  } else {
+    const params: Record<string, unknown> = {
+      threadId,
+      input: [{ type: "text", text: prompt }],
+      sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
+      approvalPolicy: PINNED_APPROVAL_POLICY,
+    };
+    if (outputSchema !== undefined) params.outputSchema = outputSchema;
+    if (opts.model) params.model = opts.model;
+    if (opts.effort) params.effort = opts.effort;
+    const r = await controlRequest<TurnStartResponse>("turn/start", params).catch((e: Error) =>
+      fail(String(e.message ?? e))
+    );
+    if (!r.turn?.id) fail("app-server returned no turn id for turn/start");
+    turnIdentified(r.turn.id);
+  }
+  return await turnDone.promise;
+}
+
+// --- Ending -------------------------------------------------------------------
+
+const sleep = (ms: number): Promise<undefined> =>
+  new Promise((r) => setTimeout(() => r(undefined), ms));
+/** `p`, or undefined if it has not resolved within `ms`. */
+const within = <T,>(p: Promise<T>, ms: number): Promise<T | undefined> =>
+  Promise.race([p, sleep(ms)]);
+
+/** Interrupt what we own, waiting (bounded) for the ids that may still be in flight: our
+ * turn id if the start response is pending, and for a review the child's turn id, which
+ * announces itself shortly after the review/start response. Child first: interrupting the
+ * parent alone does not reach it (measured). */
+async function interruptOwned(): Promise<void> {
+  if (started.value === undefined) return; // nothing was requested: nothing to interrupt
+  const deadline = Date.now() + 3000;
+  const ours = await within(turn.promise, 3000);
+  if (ours === undefined) return;
+  const kid = reviewMode === undefined
+    ? undefined
+    : await within(child.promise, Math.max(0, deadline - Date.now()));
+  const targets = [...(kid !== undefined ? [kid] : []), ours];
+  const acked = await within(
+    Promise.all(targets.map((turnId) => request("turn/interrupt", { threadId, turnId }))).then(
+      () => true,
+      () => false,
+    ),
+    3000,
+  );
+  if (acked !== true) {
+    console.error(
+      "codex-turn: turn/interrupt was not acknowledged; the server turn may still be running",
     );
   }
-  activeTurnId = r.turn.id;
-} else {
-  const params: Record<string, unknown> = {
-    threadId,
-    input: [{ type: "text", text: prompt }],
-    sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
-    approvalPolicy: PINNED_APPROVAL_POLICY,
-  };
-  if (outputSchema !== undefined) params.outputSchema = outputSchema;
-  if (opts.model) params.model = opts.model;
-  if (opts.effort) params.effort = opts.effort;
-  const r = await controlRequest<TurnStartResponse>("turn/start", params).catch((e: Error) =>
-    fail(String(e.message ?? e))
-  );
-  if (!r.turn?.id) fail("app-server returned no turn id for turn/start");
-  activeTurnId = r.turn.id;
 }
-turnIdentified();
 
-const completed = await turnDone;
-settled = true;
-const turn: Turn = completed.turn ?? {};
-let finalMessage: string | null = finalAnswer ?? lastAgentMessage;
-if (finalMessage === null) {
-  const items = (turn.items ?? []).filter((i) => i.type === "agentMessage");
-  const final = items.find((i) => i.phase === "final_answer") ?? items[items.length - 1];
-  if (final) finalMessage = final.text ?? "";
-}
-console.log(
-  JSON.stringify(
-    {
-      threadId,
-      // The turn id lets `codex-bridge.mts turn-context <thread> <turn>` pick this turn's
-      // server-side record out of a resumed thread's many.
-      turnId: activeTurnId,
-      // For a review, the turn_context lives in the subagent child turn; this is the id to
-      // give `codex-bridge.mts turn-context <thread> <turn>` (null for a plain turn).
-      reviewTurnId: childTurnId,
-      turnStatus: turn.status ?? null,
-      turnError: turn.error ?? null,
-      finalMessage,
-      tokenUsage: usageInfo,
-    },
-    null,
-    2,
-  ),
+run().then(
+  (params) => outcome.set({ kind: "completed", params }),
+  (e: Error) => outcome.set({ kind: "failed", message: String(e?.message ?? e) }),
 );
-// Let stdout drain; do not process.exit() on the success path.
-process.exitCode = turn.status === "completed" ? 0 : 1;
-ws.close();
+const result = await outcome.promise;
+switch (result.kind) {
+  case "failed":
+    console.error(`codex-turn: ${result.message}`);
+    process.exit(1);
+    break;
+  case "aborted":
+    // Reason first, so nothing that happens during the interrupt can swallow it.
+    console.error(`codex-turn: ${result.reason}`);
+    await interruptOwned();
+    process.exit(result.code);
+    break;
+  case "completed": {
+    const t: Turn = result.params.turn ?? {};
+    let finalMessage: string | null = finalAnswer ?? lastAgentMessage;
+    if (finalMessage === null) {
+      const items = (t.items ?? []).filter((i) => i.type === "agentMessage");
+      const final = items.find((i) => i.phase === "final_answer") ?? items[items.length - 1];
+      if (final) finalMessage = final.text ?? "";
+    }
+    console.log(
+      JSON.stringify(
+        {
+          threadId,
+          // The turn id lets `codex-bridge.mts turn-context <thread> <turn>` pick this turn's
+          // server-side record out of a resumed thread's many.
+          turnId: turn.value,
+          // The subagent child turn, if one announced itself: for a review that is where the
+          // turn_context lives, so it is the id to give `turn-context` (null otherwise).
+          reviewTurnId: child.value ?? null,
+          turnStatus: t.status ?? null,
+          turnError: t.error ?? null,
+          finalMessage,
+          tokenUsage: usageInfo,
+        },
+        null,
+        2,
+      ),
+    );
+    // Let stdout drain; do not process.exit() on the success path. Late triggers (a signal,
+    // a straggling 401) are no-ops now that the outcome is decided.
+    process.exitCode = t.status === "completed" ? 0 : 1;
+    ws.close();
+    break;
+  }
+}

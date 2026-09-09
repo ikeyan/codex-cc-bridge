@@ -378,6 +378,11 @@ test("review: a reviewThreadId other than our thread fails closed instead of han
   server.close();
   assert.equal(r.code, 1);
   assert.match(r.stderr, /review-thread/);
+  // The server had already accepted the review: it is interrupted where it went, not left.
+  assert.deepEqual(findRequest(recorded, "turn/interrupt").params, {
+    threadId: "review-thread",
+    turnId: "turn-1",
+  });
 });
 
 test("thread/start tells codex it is inside the Claude sandbox", async () => {
@@ -843,7 +848,7 @@ test("connection dropping while the interrupt is pending is reported, with the a
   const r = await result;
   assert.equal(r.code, 130, r.stderr);
   assert.match(r.stderr, /SIGTERM: turn interrupted/);
-  assert.match(r.stderr, /connection closed before turn\/interrupt was acknowledged/);
+  assert.match(r.stderr, /turn\/interrupt was not acknowledged/);
 });
 
 test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
