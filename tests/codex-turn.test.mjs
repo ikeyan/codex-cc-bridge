@@ -129,7 +129,13 @@ function startMockServer(onMessage) {
 // then complete the turn with one agentMessage.
 function appServerBehaviour(
   recorded,
-  { probeStdout = "BLOCKED BLOCKED WRITABLE", onTurnStart, beforeInit, turnStartResult } = {},
+  {
+    probeStdout = "BLOCKED BLOCKED WRITABLE",
+    onTurnStart,
+    beforeInit,
+    beforeTurnStartResponse,
+    turnStartResult,
+  } = {},
 ) {
   return (msg, send) => {
     if (msg.method) recorded.push(msg);
@@ -146,6 +152,8 @@ function appServerBehaviour(
     } else if (msg.method === "thread/start" || msg.method === "thread/resume") {
       send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
     } else if (msg.method === "turn/start" || msg.method === "review/start") {
+      // Notifications the server may emit before its own response reaches the client.
+      if (beforeTurnStartResponse) beforeTurnStartResponse(send);
       send({
         jsonrpc: "2.0",
         id: msg.id,
@@ -862,6 +870,40 @@ test("a 401 during a review interrupts the child turn as well as ours", async ()
   server.close();
   assert.equal(r.code, 1);
   assert.match(r.stderr, /401 Unauthorized/);
+  assert.deepEqual(
+    recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
+    ["child-turn", "turn-1"],
+  );
+});
+
+test("a review child turn/started arriving before the review/start response is not lost", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      beforeTurnStartResponse: (send) => {
+        send({
+          jsonrpc: "2.0",
+          method: "turn/started",
+          params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+        });
+      },
+      onTurnStart: () => setTimeout(() => child.kill("SIGTERM"), 150),
+    }),
+  );
+  const result = new Promise((resolve) => {
+    child = spawnDriver(
+      ["--session", makeSession(server.port), "--cwd", "/tmp", "--review", "uncommitted"],
+      {},
+    );
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.end();
+  });
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
   assert.deepEqual(
     recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
     ["child-turn", "turn-1"],

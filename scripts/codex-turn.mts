@@ -435,6 +435,11 @@ function handleTurnEvent(method: string, params: NotificationParams): void {
     // (concurrent drivers, child turns) is not ours.
     if (params.turn?.id !== activeTurnId) return;
     resolveTurn(params);
+  } else if (method === "turn/started") {
+    // A turn on our thread that is not ours: the subagent child a review runs in. Kept
+    // only so interrupts can reach it and the result can name it (reviewTurnId).
+    const id = params.turn?.id;
+    if (id !== undefined && id !== activeTurnId) childTurnId = id;
   }
 }
 function turnIdentified(): void {
@@ -466,14 +471,12 @@ ws.onmessage = (raw: MessageEvent) => {
   switch (msg.method) {
     case "item/completed":
     case "turn/completed":
+    case "turn/started":
+      // turn/started included: the review child's can share a TCP chunk with the
+      // review/start response, i.e. arrive before activeTurnId is known.
       if (activeTurnId === null) earlyEvents.push({ method: msg.method, params });
       else handleTurnEvent(msg.method, params);
       break;
-    case "turn/started": {
-      const id = params.turn?.id;
-      if (id !== undefined && activeTurnId !== null && id !== activeTurnId) childTurnId = id;
-      break;
-    }
     case "thread/tokenUsage/updated":
       usageInfo = params.tokenUsage ?? params ?? null;
       break;

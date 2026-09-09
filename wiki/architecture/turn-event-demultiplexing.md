@@ -62,4 +62,5 @@ review では本体が subagent の子 turn で走り、**親 turn だけを int
 (実測: 90 秒走り続けた)。子 turn の id は自分の thread に別 turnId で届く `turn/started` に
 乗ってくるので、driver はそれを覚えておき、signal 時は子 → 親の順に `turn/interrupt` を送る
 (子を止めると親も同時に abort される。canon: `facts/codex/review-start-inline-same-thread`)。
-`turn/started` を見るのはこの目的だけで、完了判定には使わない。
+`turn/started` を見るのはこの目的だけで、完了判定には使わない。この通知も `review/start` の応答と
+同じ TCP チャンクで届きうるので、上の `earlyEvents` バッファと同じ経路に乗せて replay する。
