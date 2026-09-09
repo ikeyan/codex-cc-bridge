@@ -54,14 +54,12 @@ replay** する。バッファは 1 箇所・replay 先は 1 経路に保って�
 ## 中断
 
 SIGTERM / SIGINT (= CC の `TaskStop`) と、待っても無駄な条件 (OpenAI からの 401 = 認証情報が
-読めないか未ログイン。server は再試行を止めない) は同じ `abortTurn` に入り、理由を先に出力してから
-`turn/interrupt` を送って終了する。理由を先に出すのは、interrupt された turn の `turn/completed` が
-interrupt 応答より先に届いて本経路が結果 JSON を出し終えても、理由が消えないため。
-サーバー側の turn を止めないと、driver が死んだあともトークンを消費し続けファイルを書き換え得るため。
-`turn/start` の応答待ち中に signal が来た場合は turn id が無いので、最大 3 秒だけ id の到着を
-待ってから interrupt する (review では子 turn の id も同じ猶予で待つ)。abort 進行中や完了後の
-再トリガーは無視する — 完了後に `process.exit` すると stdout に流しかけの結果 JSON が切れる。
-この組合せ (状態 × トリガー) を bool フラグと if で書くと、セルを 1 つ直すたびに隣が開く。
+読めないか未ログイン。server は再試行を止めない) は、どちらも `outcome` を「中断」に決めるだけ。
+`outcome` を待つ 1 箇所の終了処理が理由を先に出力し、`turn/interrupt` を送ってから終了する
+(サーバー側の turn を止めないと、driver が死んだあともトークンを消費し続けファイルを書き換え得る)。
+完了後のトリガーは `outcome` が既に決まっているので何もしない — 完了後に `process.exit` すると
+stdout に流しかけの結果 JSON が切れる。
+状態 × トリガーの組合せを bool フラグと if で書くと、セルを 1 つ直すたびに隣が開く。
 そこで driver は**一度だけ決まる値** = promise だけで状態を持つ (`resolve` は 2 回目以降が no-op
 なので、再トリガー・完了後のシグナル・interrupt 応答と競合する `turn/completed` に個別の分岐が
 要らない)。同期的に読む必要がある値 (turn id によるフィルタ) だけ `Once<T>` (promise + 読み出し) にする。

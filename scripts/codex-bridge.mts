@@ -76,7 +76,7 @@ function init(): void {
       `  codex app-server --listen "ws://127.0.0.1:0" --ws-auth capability-token --ws-token-file ${
         shellQuote(tokenFile)
       }\n` +
-      `  node codex-bridge.mts ready ${shellQuote(dir)} <that task's output file>`,
+      `  node ${shellQuote(process.argv[1])} ready ${shellQuote(dir)} <that task's output file>`,
   );
 }
 

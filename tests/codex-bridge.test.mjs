@@ -65,7 +65,8 @@ test("init: private dir, 0600 hex token, dir on stdout, quoted launch hint on st
     r.stderr.includes(`--ws-token-file '${tokenFile}'`),
     `launch hint must single-quote the token path:\n${r.stderr}`,
   );
-  assert.ok(r.stderr.includes(`ready '${dir}'`), r.stderr);
+  // The hint must be runnable from any cwd: the helper's own absolute path, quoted.
+  assert.ok(r.stderr.includes(`node '${HELPER}' ready '${dir}'`), r.stderr);
 });
 
 test("init: the launch hint stays a valid shell word when the path has a quote", async () => {
