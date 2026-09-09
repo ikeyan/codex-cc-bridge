@@ -509,8 +509,13 @@ ws.onmessage = (raw: MessageEvent) => {
 // turn/start response has not arrived yet, wait briefly for the turn ID first. The reason is
 // printed up front so nothing that races us (a turn/completed for the interrupted turn,
 // which makes the main path print its JSON and settle) can swallow it.
+let aborting = false;
 function abortTurn(reason: string, code: number): void {
+  // A second trigger while an abort is in flight (the server keeps emitting 401s; a second
+  // signal) must not cut the turn-id wait / interrupt grace short: ignore it.
+  if (aborting) return;
   if (settled) process.exit(code);
+  aborting = true;
   settled = true;
   console.error(`codex-turn: ${reason}`);
   const finish = (): never => process.exit(code);

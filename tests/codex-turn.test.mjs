@@ -997,6 +997,42 @@ test("a 401 arriving before the turn/start response still interrupts the turn", 
   });
 });
 
+test("repeated 401s while the turn/start response is pending still end in an interrupt", async () => {
+  const recorded = [];
+  const err = {
+    jsonrpc: "2.0",
+    method: "error",
+    params: {
+      threadId: "thread-1",
+      error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+    },
+  };
+  const server = await startMockServer((msg, send) => {
+    if (msg.method) recorded.push(msg);
+    if (msg.id === undefined) return;
+    if (msg.method === "turn/start") {
+      // The server keeps retrying (several 401s) and only then answers turn/start.
+      send(err);
+      setTimeout(() => send(err), 100);
+      setTimeout(() => send(err), 200);
+      setTimeout(
+        () => send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "turn-1" } } }),
+        400,
+      );
+      return;
+    }
+    appServerBehaviour(recorded)(msg, send);
+  });
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.equal((r.stderr.match(/401 Unauthorized/g) ?? []).length, 1, "reason printed once");
+  assert.deepEqual(findRequest(recorded, "turn/interrupt").params, {
+    threadId: "thread-1",
+    turnId: "turn-1",
+  });
+});
+
 test("a 401 from OpenAI mid-turn interrupts and fails instead of waiting forever", async () => {
   const recorded = [];
   const server = await startMockServer(
