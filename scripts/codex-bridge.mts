@@ -118,11 +118,26 @@ async function ready(dir: string, outputFile: string): Promise<void> {
       }
     }
     if (port !== undefined && await readyz(port)) {
-      // Publish only after readiness, atomically: a driver must never read a half-written
-      // or not-yet-ready port.
-      const tmp = `${portFile}.tmp`;
+      // Publish only after readiness, atomically AND exclusively: a driver must never read
+      // a half-written or not-yet-ready port, and two concurrent `ready` calls on one dir
+      // must not both win. link(2) fails with EEXIST if the port file already exists (rename
+      // would silently replace it), so the first publisher wins and the other fails loudly.
+      const tmp = `${portFile}.${process.pid}.tmp`;
       fs.writeFileSync(tmp, `${port}\n`, { mode: 0o600 });
-      fs.renameSync(tmp, portFile);
+      try {
+        fs.linkSync(tmp, portFile);
+      } catch (e) {
+        fs.unlinkSync(tmp);
+        if ((e as { code?: string }).code === "EEXIST") {
+          fail(
+            `${dir} was bound by a concurrent ready (port ${
+              fs.readFileSync(portFile, "utf8").trim()
+            }) while this one waited for ${port}; run init for a new server`,
+          );
+        }
+        throw e;
+      }
+      fs.unlinkSync(tmp);
       console.log(port);
       return;
     }
@@ -168,12 +183,26 @@ interface RolloutMeta {
 function rolloutMeta(file: string): RolloutMeta | undefined {
   const fd = fs.openSync(file, "r");
   try {
-    // session_meta is the first line and can be large (it embeds base_instructions).
-    const buf = Buffer.alloc(1 << 20);
-    const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    const nl = buf.indexOf(0x0a);
-    if (nl < 0 || nl >= n) return undefined;
-    const rec = JSON.parse(buf.subarray(0, nl).toString("utf8"));
+    // session_meta is the first line and can be large (it embeds base_instructions, whose
+    // size is unbounded), so read chunk by chunk until the first newline or EOF rather than
+    // through a fixed window.
+    const chunks: Buffer[] = [];
+    let line: Buffer | undefined;
+    let pos = 0;
+    while (line === undefined) {
+      const chunk = Buffer.alloc(64 * 1024);
+      const n = fs.readSync(fd, chunk, 0, chunk.length, pos);
+      if (n === 0) return undefined; // EOF without a newline: not a complete record
+      const nl = chunk.subarray(0, n).indexOf(0x0a);
+      if (nl >= 0) {
+        chunks.push(chunk.subarray(0, nl));
+        line = Buffer.concat(chunks);
+      } else {
+        chunks.push(chunk.subarray(0, n));
+        pos += n;
+      }
+    }
+    const rec = JSON.parse(line.toString("utf8"));
     return rec?.type === "session_meta" ? rec.payload : undefined;
   } catch {
     return undefined;

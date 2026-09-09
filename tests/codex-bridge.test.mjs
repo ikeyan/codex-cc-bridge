@@ -101,6 +101,27 @@ test("ready: a dir can be bound only once (fresh init per server launch)", async
   assert.match(again.stderr, /already bound/);
 });
 
+test("ready: two concurrent readies on one dir => exactly one wins, port is the winner's", async () => {
+  const a = await readyzServer();
+  const b = await readyzServer();
+  const dir = (await run(["init"], { TMPDIR: scratch() })).stdout.trim();
+  const outA = join(scratch(), "a.output");
+  const outB = join(scratch(), "b.output");
+  writeFileSync(outA, `listening on: ws://127.0.0.1:${a.port}\n`);
+  writeFileSync(outB, `listening on: ws://127.0.0.1:${b.port}\n`);
+  const [ra, rb] = await Promise.all([run(["ready", dir, outA]), run(["ready", dir, outB])]);
+  a.close();
+  b.close();
+  const results = [ra, rb];
+  const winners = results.filter((r) => r.code === 0);
+  const losers = results.filter((r) => r.code !== 0);
+  assert.equal(winners.length, 1, JSON.stringify(results));
+  assert.equal(losers.length, 1);
+  assert.match(losers[0].stderr, /bound/);
+  assert.equal(readFileSync(join(dir, "port"), "utf8").trim(), winners[0].stdout.trim());
+  assert.equal(existsSync(join(dir, `port.tmp`)), false);
+});
+
 test("ready: tolerates the output file appearing late", async () => {
   const srv = await readyzServer();
   const dir = (await run(["init"], { TMPDIR: scratch() })).stdout.trim();
@@ -244,6 +265,17 @@ test("turn-context: includes subagent child rollouts (where a review's turn_cont
   const missing = await run(["turn-context", "thread-A", "nope"], { CODEX_HOME: home });
   assert.equal(missing.code, 1);
   assert.match(missing.stderr, /child rollout/);
+});
+
+test("turn-context: a session_meta line larger than 1 MiB is still matched", async () => {
+  const big = JSON.stringify({
+    type: "session_meta",
+    payload: { id: "thread-big", base_instructions: { text: "x".repeat(2 * 1024 * 1024) } },
+  });
+  const home = fakeCodexHome({ "rollout-big.jsonl": [big, ctx("t1", "m-big")] });
+  const r = await run(["turn-context", "thread-big"], { CODEX_HOME: home });
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout).turnContexts.map((c) => c.model), ["m-big"]);
 });
 
 test("turn-context: two rollouts claiming one thread is an error, not a guess", async () => {
