@@ -219,6 +219,7 @@ test("turn: sandbox pinned to danger-full-access at thread AND turn level", asyn
   assert.equal(out.finalMessage, "MOCK_DONE");
   assert.equal(out.threadId, "thread-1");
   assert.equal(out.turnId, "turn-1");
+  assert.equal(out.reviewTurnId, null);
   assert.equal(out.turnStatus, "completed");
 });
 
@@ -832,6 +833,65 @@ test("SIGTERM racing the turn/start response still interrupts the turn", async (
   assert.equal(r.code, 130, r.stderr);
   const interrupt = findRequest(recorded, "turn/interrupt");
   assert.deepEqual(interrupt.params, { threadId: "thread-1", turnId: "turn-1" });
+});
+
+test("a 401 during a review interrupts the child turn as well as ours", async () => {
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        send({
+          jsonrpc: "2.0",
+          method: "turn/started",
+          params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            turnId: "child-turn",
+            willRetry: true,
+            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+          },
+        });
+      },
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp", "--review", "uncommitted"], { port: server.port });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /401 Unauthorized/);
+  assert.deepEqual(
+    recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
+    ["child-turn", "turn-1"],
+  );
+});
+
+test("review result carries the child turn id for turn-context", async () => {
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        send({
+          jsonrpc: "2.0",
+          method: "turn/started",
+          params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "turn/completed",
+          params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
+        });
+      },
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp", "--review", "uncommitted"], { port: server.port });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.turnId, "turn-1");
+  assert.equal(out.reviewTurnId, "child-turn");
 });
 
 test("a 401 from OpenAI mid-turn interrupts and fails instead of waiting forever", async () => {

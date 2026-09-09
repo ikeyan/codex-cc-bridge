@@ -54,6 +54,8 @@ codex は thread ごとの記録を `~/.codex/sessions/<年>/<月>/<日>/rollout
 確かめるべき `model` / `sandbox_policy` は `children[].turnContexts` の方を見る
 (canon: `facts/codex/review-start-inline-same-thread`)。driver が返す `turnId` は親 turn の id で、
 子 turn の id とは別物 (レビュー中に親 threadId で届く別 turnId の `turn/started` がそれ)。
+driver はその子 turn の id を結果 JSON の `reviewTurnId` に載せるので、review の記録を turn で
+絞るときはそれを `turn-context` に渡す (`turnId` を渡すと子の記録は一致せず空になる)。
 
 ## ついでに得られるもの
 

@@ -329,6 +329,12 @@ let activeTurnId: string | null = null;
 // child running (measured), so remember it for turn/interrupt.
 let childTurnId: string | null = null;
 let authBailed = false;
+/** Send turn/interrupt for every turn we own: the review child first (interrupting only the
+ * parent does not reach it, measured), then our own. Resolves when all have been answered. */
+function interruptAll(): Promise<unknown> {
+  const targets = [...(childTurnId ? [childTurnId] : []), activeTurnId];
+  return Promise.all(targets.map((turnId) => request("turn/interrupt", { threadId, turnId })));
+}
 let startRequested = false;
 let finalAnswer: string | null = null;
 let lastAgentMessage: string | null = null;
@@ -490,7 +496,7 @@ ws.onmessage = (raw: MessageEvent) => {
               "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
           );
         if (threadId && activeTurnId) {
-          request("turn/interrupt", { threadId, turnId: activeTurnId }).then(bail, bail);
+          interruptAll().then(bail, bail);
           setTimeout(bail, 3000);
         } else bail();
       }
@@ -514,9 +520,7 @@ function onSignal(signal: string): void {
   const interrupt = (): void => {
     // Child first: for a review it is the turn doing the work, and interrupting it also
     // aborts the parent. Interrupting the parent alone does not reach the child.
-    const targets = [...(childTurnId ? [childTurnId] : []), activeTurnId];
-    Promise.all(targets.map((turnId) => request("turn/interrupt", { threadId, turnId })))
-      .then(finish, finish);
+    interruptAll().then(finish, finish);
     setTimeout(finish, 3000);
   };
   if (threadId && activeTurnId) {
@@ -719,6 +723,9 @@ console.log(
       // The turn id lets `codex-bridge.mts turn-context <thread> <turn>` pick this turn's
       // server-side record out of a resumed thread's many.
       turnId: activeTurnId,
+      // For a review, the turn_context lives in the subagent child turn; this is the id to
+      // give `codex-bridge.mts turn-context <thread> <turn>` (null for a plain turn).
+      reviewTurnId: childTurnId,
       turnStatus: turn.status ?? null,
       turnError: turn.error ?? null,
       finalMessage,

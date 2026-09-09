@@ -92,7 +92,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> < /path/to/p
 
 (prompt を渡す口は stdin だけ。`--prompt` のようなフラグは無い。)
 
-- 結果: stdout に JSON `{ threadId, turnId, turnStatus, turnError, finalMessage, tokenUsage }`。
+- 結果: stdout に JSON `{ threadId, turnId, reviewTurnId, turnStatus, turnError, finalMessage, tokenUsage }`
+  (`reviewTurnId` は review のときだけ非 null。レビュー本体を走らせた子 turn の id)。
 - 進捗: stderr に 1 行 1 イベント (コマンド実行・エージェントメッセージ)。Monitor で追える。
 - キャンセル: TaskStop (SIGTERM) で driver は `turn/interrupt` を送ってから終了する。
   server 側の turn も止まる (放置トークン消費なし)。review は subagent の子 turn で走るので、
@@ -110,7 +111,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> < /path/to/p
   `node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-bridge.mts" turn-context <threadId> [<turnId>]` が出す
   `turn_context.model` (server 側の記録) で確かめる。同じ記録の `sandbox_policy` / `approval_policy`
   で、danger-full-access / never が実際に適用されたことも事後確認できる。**review の記録は出力の
-  `children[]` (subagent の子 thread) 側にある** — 親 thread には review の turn_context が無い。
+  `children[]` (subagent の子 thread) 側にあり、turn で絞るなら `turnId` でなく結果 JSON の
+  `reviewTurnId` を渡す** — 親 thread には review の turn_context が無い。
 - 効力: `--effort E` (任意)。**turn 単位の設定なのでレビューには渡せない** (driver が拒否する)。
   レビューの effort は `~/.codex/config.toml` の `model_reasoning_effort` に従う。
 - 並行: 独立したタスクは複数 background task で fan-out してよい
