@@ -28,8 +28,12 @@ import path from "node:path";
 import process from "node:process";
 import { parseArgs } from "node:util";
 
-// Env override exists for tests (a stalled /readyz must be provable in seconds).
-const READY_TIMEOUT_MS = Number(process.env.CODEX_BRIDGE_READY_TIMEOUT_MS ?? 30_000);
+// Env override exists for tests (a stalled /readyz must be provable in seconds). Validated
+// below once usage() exists: Infinity would poll forever, NaN/negative would time out at once.
+const readyTimeoutEnv = process.env.CODEX_BRIDGE_READY_TIMEOUT_MS;
+const READY_TIMEOUT_MS = readyTimeoutEnv === undefined || readyTimeoutEnv === ""
+  ? 30_000
+  : Number(readyTimeoutEnv);
 const READYZ_FETCH_TIMEOUT_MS = 2_000;
 const POLL_INTERVAL_MS = 250;
 // The app-server prints its endpoint once it is bound. Port 0 means the OS picks a
@@ -49,6 +53,10 @@ function usage(message?: string): never {
 function fail(message: string): never {
   console.error(`codex-bridge: ${message}`);
   process.exit(1);
+}
+
+if (!(Number.isFinite(READY_TIMEOUT_MS) && READY_TIMEOUT_MS > 0)) {
+  usage(`CODEX_BRIDGE_READY_TIMEOUT_MS must be a positive number of ms, got ${readyTimeoutEnv}`);
 }
 
 /** POSIX single-quoting: the only escaping that survives every shell the hint may be pasted into. */

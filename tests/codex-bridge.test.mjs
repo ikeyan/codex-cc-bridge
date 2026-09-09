@@ -288,6 +288,14 @@ test("turn-context: two rollouts claiming one thread is an error, not a guess", 
   assert.match(r.stderr, /ambiguous/);
 });
 
+test("a non-numeric ready timeout override is rejected, not turned into NaN/Infinity", async () => {
+  for (const bad of ["soon", "Infinity", "-5", "0"]) {
+    const r = await run(["init"], { CODEX_BRIDGE_READY_TIMEOUT_MS: bad, TMPDIR: scratch() });
+    assert.equal(r.code, 2, bad);
+    assert.match(r.stderr, /CODEX_BRIDGE_READY_TIMEOUT_MS/, bad);
+  }
+});
+
 test("usage errors exit 2", async () => {
   assert.equal((await run(["turn-context"])).code, 2);
   assert.equal((await run(["turn-context", "a", "b", "c"])).code, 2);
