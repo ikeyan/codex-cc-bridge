@@ -775,6 +775,74 @@ test("SIGTERM during a review interrupts the subagent child turn as well as ours
   ]);
 });
 
+test("SIGTERM before the review child's turn/started arrives still waits for and interrupts it", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        // The child's turn/started trails the review/start response by a moment (measured);
+        // the cancel lands inside that window.
+        setTimeout(() => child.kill("SIGTERM"), 100);
+        setTimeout(
+          () =>
+            send({
+              jsonrpc: "2.0",
+              method: "turn/started",
+              params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+            }),
+          400,
+        );
+      },
+    }),
+  );
+  const result = new Promise((resolve) => {
+    child = spawnDriver(
+      ["--session", makeSession(server.port), "--cwd", "/tmp", "--review", "uncommitted"],
+      {},
+    );
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.end();
+  });
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
+  assert.deepEqual(
+    recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
+    ["child-turn", "turn-1"],
+  );
+});
+
+test("connection dropping while the interrupt is pending is reported, with the abort's exit code", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer((msg, send) => {
+    if (msg.method) recorded.push(msg);
+    if (msg.id === undefined) return;
+    if (msg.method === "turn/interrupt") {
+      server.close(); // never acknowledged: the socket goes away instead
+      return;
+    }
+    appServerBehaviour(recorded, {
+      onTurnStart: () => setTimeout(() => child.kill("SIGTERM"), 100),
+    })(msg, send);
+  });
+  const result = new Promise((resolve) => {
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.write("x");
+    child.stdin.end();
+  });
+  const r = await result;
+  assert.equal(r.code, 130, r.stderr);
+  assert.match(r.stderr, /SIGTERM: turn interrupted/);
+  assert.match(r.stderr, /connection closed before turn\/interrupt was acknowledged/);
+});
+
 test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
   const recorded = [];
   let child;

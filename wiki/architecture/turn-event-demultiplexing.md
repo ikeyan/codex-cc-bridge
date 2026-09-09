@@ -59,7 +59,11 @@ SIGTERM / SIGINT (= CC の `TaskStop`) と、待っても無駄な条件 (OpenAI
 interrupt 応答より先に届いて本経路が結果 JSON を出し終えても、理由が消えないため。
 サーバー側の turn を止めないと、driver が死んだあともトークンを消費し続けファイルを書き換え得るため。
 `turn/start` の応答待ち中に signal が来た場合は turn id が無いので、最大 3 秒だけ id の到着を
-待ってから interrupt する。
+待ってから interrupt する (review では子 turn の id も同じ猶予で待つ)。abort 進行中や完了後の
+再トリガーは無視する — 完了後に `process.exit` すると stdout に流しかけの結果 JSON が切れる。
+中断ロジックは「状態 (開始前 / 応答待ち / turn 中 / 完了後 / review で子 id 未知) × トリガー
+(SIGTERM / 401 / 再トリガー / ws 切断)」の組合せで、`tests/codex-turn.test.mjs` の SIGTERM・401 の
+テスト群が各セルを pin している。1 セルだけ直すと隣が開くので、直すときは表を先に埋める。
 
 review では本体が subagent の子 turn で走り、**親 turn だけを interrupt しても子は止まらない**
 (実測: 90 秒走り続けた)。子 turn の id は自分の thread に別 turnId で届く `turn/started` に

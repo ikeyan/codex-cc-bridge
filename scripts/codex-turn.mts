@@ -361,6 +361,13 @@ ws.onerror = () => {
 };
 ws.onclose = () => {
   if (!settled) fail("app-server connection closed before the turn completed");
+  else if (aborting) {
+    // fail() is muted once settled; say what happened to the interrupt we were waiting on.
+    console.error(
+      "codex-turn: app-server connection closed before turn/interrupt was acknowledged; the server turn may still be running",
+    );
+    process.exit(abortCode);
+  }
 };
 
 const send = (msg: object): void => ws.send(JSON.stringify(msg));
@@ -510,37 +517,33 @@ ws.onmessage = (raw: MessageEvent) => {
 // printed up front so nothing that races us (a turn/completed for the interrupted turn,
 // which makes the main path print its JSON and settle) can swallow it.
 let aborting = false;
+let abortCode = 1;
 function abortTurn(reason: string, code: number): void {
   // A second trigger while an abort is in flight (the server keeps emitting 401s; a second
-  // signal) must not cut the turn-id wait / interrupt grace short: ignore it.
-  if (aborting) return;
-  if (settled) process.exit(code);
+  // signal) must not cut the turn-id wait / interrupt grace short: ignore it. After the turn
+  // has settled the process is already on its way out (result JSON draining to stdout); an
+  // exit() here could truncate that JSON, so ignore the trigger then too.
+  if (aborting || settled) return;
   aborting = true;
+  abortCode = code;
   settled = true;
   console.error(`codex-turn: ${reason}`);
   const finish = (): never => process.exit(code);
-  const interrupt = (): void => {
-    // Child first: for a review it is the turn doing the work, and interrupting it also
-    // aborts the parent. Interrupting the parent alone does not reach the child.
-    interruptAll().then(finish, finish);
-    setTimeout(finish, 3000);
+  if (!startRequested) finish();
+  // Wait (bounded) until we know what to interrupt: our turn id, and for a review also the
+  // child's, which arrives as a turn/started shortly after the review/start response.
+  const deadline = Date.now() + 3000;
+  const tick = (): void => {
+    const known = threadId && activeTurnId && (reviewMode === undefined || childTurnId !== null);
+    if (!known && Date.now() < deadline) return;
+    clearInterval(poll);
+    if (threadId && activeTurnId) {
+      interruptAll().then(finish, finish);
+      setTimeout(finish, 3000);
+    } else finish();
   };
-  if (threadId && activeTurnId) {
-    interrupt();
-  } else if (startRequested) {
-    const deadline = Date.now() + 3000;
-    const poll = setInterval(() => {
-      if (threadId && activeTurnId) {
-        clearInterval(poll);
-        interrupt();
-      } else if (Date.now() > deadline) {
-        clearInterval(poll);
-        finish();
-      }
-    }, 100);
-  } else {
-    finish();
-  }
+  const poll = setInterval(tick, 50);
+  tick();
 }
 process.on("SIGINT", () => abortTurn("SIGINT: turn interrupted", 130));
 process.on("SIGTERM", () => abortTurn("SIGTERM: turn interrupted", 130));
