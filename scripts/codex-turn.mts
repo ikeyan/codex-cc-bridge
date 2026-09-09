@@ -214,10 +214,11 @@ if (!needsTargetFile && opts["target-file"]) {
     `--target-file only applies to --review base|commit (got --review ${reviewMode ?? "<none>"})`,
   );
 }
-/** One non-empty line of plain text from FILE (trailing newline tolerated). */
+/** One non-empty line of plain text from FILE: only the line terminator is removed, since a
+ * branch name may legally begin or end with Unicode whitespace and trim() would silently
+ * retarget the review. */
 function readTargetLine(file: string, what: string): string {
-  const text = fs.readFileSync(file, "utf8");
-  const line = text.trim();
+  const line = fs.readFileSync(file, "utf8").replace(/\r?\n$/, "");
   if (!line || line.includes("\n")) {
     usage(`${file} must hold exactly one non-empty line (the ${what})`);
   }
@@ -446,6 +447,29 @@ function handleTurnEvent(method: string, params: NotificationParams): void {
     // only so interrupts can reach it and the result can name it (reviewTurnId).
     const id = params.turn?.id;
     if (id !== undefined && id !== activeTurnId) childTurnId = id;
+  } else if (method === "error") {
+    // Ours if it names our turn or the review child, or names no turn (thread-level). A
+    // review's child may not be identified yet, so accept unknown turn ids in that window.
+    const t = params.turnId;
+    const ours = t === undefined || t === activeTurnId || t === childTurnId ||
+      (reviewMode !== undefined && childTurnId === null);
+    if (!ours) return;
+    progress("error", { detail: params });
+    // Codex cannot authenticate to OpenAI (auth.json unreadable under a read-restricted
+    // sandbox, or logged out): the server retries forever and the turn never completes
+    // (measured), so waiting is pointless. Interrupt and say why.
+    const status = (params as {
+      error?: { codexErrorInfo?: { responseStreamDisconnected?: { httpStatusCode?: number } } };
+    })
+      .error?.codexErrorInfo?.responseStreamDisconnected?.httpStatusCode;
+    if (status === 401) {
+      abortTurn(
+        "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
+          "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
+          "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
+        1,
+      );
+    }
   }
 }
 function turnIdentified(): void {
@@ -478,33 +502,16 @@ ws.onmessage = (raw: MessageEvent) => {
     case "item/completed":
     case "turn/completed":
     case "turn/started":
-      // turn/started included: the review child's can share a TCP chunk with the
-      // review/start response, i.e. arrive before activeTurnId is known.
+    case "error":
+      // turn/started and error included: both are filtered by turn id, and both can share a
+      // TCP chunk with the turn/start (review/start) response, i.e. arrive before
+      // activeTurnId is known.
       if (activeTurnId === null) earlyEvents.push({ method: msg.method, params });
       else handleTurnEvent(msg.method, params);
       break;
     case "thread/tokenUsage/updated":
       usageInfo = params.tokenUsage ?? params ?? null;
       break;
-    case "error": {
-      progress("error", { detail: params });
-      // Codex cannot authenticate to OpenAI (auth.json unreadable under a read-restricted
-      // sandbox, or logged out): the server retries forever and the turn never completes
-      // (measured), so waiting is pointless. Interrupt and say why.
-      const status = (params as {
-        error?: { codexErrorInfo?: { responseStreamDisconnected?: { httpStatusCode?: number } } };
-      })
-        .error?.codexErrorInfo?.responseStreamDisconnected?.httpStatusCode;
-      if (status === 401) {
-        abortTurn(
-          "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
-            "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
-            "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
-          1,
-        );
-      }
-      break;
-    }
     default:
       break;
   }

@@ -642,7 +642,10 @@ test("review: base/commit take their value from --target-file verbatim (no shell
   const branch = "topic/$(id)/it's";
   const cases = [
     ["base", `${branch}\n`, { type: "baseBranch", branch }],
-    ["commit", "  0123abcd\n\n", { type: "commit", sha: "0123abcd" }],
+    ["commit", "0123abcd\n", { type: "commit", sha: "0123abcd" }],
+    // Only the line terminator comes off: leading/trailing Unicode whitespace is part of
+    // the name git accepts, and trimming it would silently review another branch.
+    ["base", "\u00a0main \r\n", { type: "baseBranch", branch: "\u00a0main " }],
   ];
   for (const [mode, fileText, expected] of cases) {
     const recorded = [];
@@ -1099,6 +1102,45 @@ test("repeated 401s while the turn/start response is pending still end in an int
     threadId: "thread-1",
     turnId: "turn-1",
   });
+});
+
+test("a 401 for a turn that is not ours is ignored", async () => {
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        send({
+          jsonrpc: "2.0",
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            turnId: "unrelated-turn",
+            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: { type: "agentMessage", text: "FINE", phase: "final_answer" },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "turn/completed",
+          params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
+        });
+      },
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).finalMessage, "FINE");
+  assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
+  assert.doesNotMatch(r.stderr, /401 Unauthorized/);
 });
 
 test("a 401 from OpenAI mid-turn interrupts and fails instead of waiting forever", async () => {
