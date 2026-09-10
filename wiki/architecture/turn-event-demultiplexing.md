@@ -97,7 +97,10 @@ start 要求が応答待ちのまま中断された場合だけは、その応�
 interrupt の応答待ち・handshake 待ち・この締切は、超過を例外 (`TimeoutError` / `AbortError`)
 として扱い、理由を出して終了する。待ちは node 組み込み (`events.once` + `AbortSignal.timeout`、`timers/promises`、
 `Promise.withResolvers`) で書き、自前のタイマー管理は持たない。
-`tests/codex-turn.test.mjs` の SIGTERM・401 のテスト群が各セルを pin している。
+`tests/codex-turn.test.mjs` の SIGTERM・401 のテスト群が各セルを pin し、
+`tests/codex-turn.property.test.mjs` が同じ文法からイベント列とトリガー位置を生成して (fast-check)
+「終わり方はちょうど 1 つ」「interrupt の宛先は子 → 親」「終了コード」「結果 JSON は完了時だけ」
+「待ちは送られたイベントで終わる (経過時間)」を確かめる。
 
 review では本体が subagent の子 turn で走り、**親 turn だけを interrupt しても子は止まらない**
 (実測: 90 秒走り続けた)。子 turn の id は自分の thread に別 turnId で届く `turn/started` に
