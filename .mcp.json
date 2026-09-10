@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lsmcp": {
+      "command": "npx",
+      "args": ["-y", "@mizchi/lsmcp", "-p", "tsgo"]
+    }
+  }
+}
