@@ -287,17 +287,26 @@ function installedPackageMajor(nodeModulesDir, packageName) {
 
 //#endregion
 //#region src/utils/binFinder.ts
-/** Binary names and args to search in this node_modules, applying `override`. */
-function candidatesIn(nodeModules, item, defaultArgs) {
-	const override = item.override;
-	if (override && (installedPackageMajor(nodeModules, override.package) ?? -Infinity) >= override.minMajor) return {
-		names: override.names,
-		args: override.args ?? defaultArgs
-	};
-	return {
+/**
+* Binary names and args for a node_modules item. The nearest installed copy
+* of `override.package` decides once whether the override applies.
+*/
+function candidatesFor(nodeModulesDirs, item, defaultArgs) {
+	const plain = {
 		names: item.names,
 		args: defaultArgs
 	};
+	const override = item.override;
+	if (!override) return plain;
+	for (const nodeModules of nodeModulesDirs) {
+		const major = installedPackageMajor(nodeModules, override.package);
+		if (major === void 0) continue;
+		return major >= override.minMajor ? {
+			names: override.names,
+			args: override.args ?? defaultArgs
+		} : plain;
+	}
+	return plain;
 }
 /** `dir` followed by each of its ancestors up to the filesystem root. */
 function* selfAndAncestors(dir) {
@@ -358,18 +367,16 @@ function findBinary(strategy, projectRoot = process.cwd()) {
 				break;
 			}
 			case "node_modules": {
-				for (const dir of selfAndAncestors(projectRoot)) {
-					const nodeModules = join$1(dir, "node_modules");
-					const { names, args } = candidatesIn(nodeModules, item, defaultArgs);
-					for (const name of names) {
-						const bin = join$1(nodeModules, ".bin", name);
-						if (existsSync$1(bin)) {
-							mcpDebugWithPrefix("BinFinder", `Found in node_modules: ${bin}`);
-							return {
-								command: bin,
-								args
-							};
-						}
+				const nodeModulesDirs = [...selfAndAncestors(projectRoot)].map((dir) => join$1(dir, "node_modules"));
+				const { names, args } = candidatesFor(nodeModulesDirs, item, defaultArgs);
+				for (const nodeModules of nodeModulesDirs) for (const name of names) {
+					const bin = join$1(nodeModules, ".bin", name);
+					if (existsSync$1(bin)) {
+						mcpDebugWithPrefix("BinFinder", `Found in node_modules: ${bin}`);
+						return {
+							command: bin,
+							args
+						};
 					}
 				}
 				break;
