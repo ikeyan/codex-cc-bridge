@@ -14,18 +14,14 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // Claude Code settings keys, codex app-server schema types, web platform error names.
 const EXTERNAL = new Set([
   "AbortError",
-  "TimeoutError",
   "ThreadStartResponse",
   "allowUnixSockets",
   "allowAllUnixSockets",
   "allowWrite",
-  "allowRead",
   "denyRead",
   "blockReads",
   "blockReadsOutsideWorkingDirectories",
-  "allowLocalBinding",
-  "allowedDomains",
-  "failIfUnavailable",
+  "dangerouslyDisableSandbox",
 ]);
 
 function* files(dir: string, ext: string): Generator<string> {
@@ -36,14 +32,12 @@ function* files(dir: string, ext: string): Generator<string> {
   }
 }
 
+// Only real code counts as "exists": comments are stripped so a removed identifier that
+// lingers in a comment does not vouch for itself, and tests are excluded so a test title
+// cannot either.
 let code = "";
-for (
-  const f of [
-    ...files(path.join(root, "scripts"), ".mts"),
-    ...files(path.join(root, "tests"), ".mjs"),
-  ]
-) {
-  code += fs.readFileSync(f, "utf8");
+for (const f of files(path.join(root, "scripts"), ".mts")) {
+  code += fs.readFileSync(f, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 }
 const known = new Set(code.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []);
 
