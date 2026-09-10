@@ -2,7 +2,7 @@
   "mcpServers": {
     "lsmcp": {
       "command": "node",
-      "args": ["${HOME}/hobby/lsmcp/dist/lsmcp.js", "-p", "tsgo"]
+      "args": ["vendor/lsmcp/lsmcp.js", "-p", "tsgo"]
     }
   }
 }

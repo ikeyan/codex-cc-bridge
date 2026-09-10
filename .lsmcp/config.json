@@ -1,6 +1,14 @@
 {
-  "$schema": "../node_modules/@mizchi/lsmcp/lsmcp.schema.json",
+  "$schema": "../vendor/lsmcp/lsmcp.schema.json",
   "preset": "tsgo",
-  "files": ["**/*.ts", "**/*.mts"],
-  "ignorePatterns": ["**/node_modules/**", "**/.venv/**", "**/.git/**"]
+  "files": [
+    "**/*.ts",
+    "**/*.mts"
+  ],
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/.venv/**",
+    "**/.git/**",
+    "**/vendor/**"
+  ]
 }
