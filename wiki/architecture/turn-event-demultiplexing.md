@@ -83,10 +83,12 @@ driver が自 thread について受け取る列を記号にすると (`S` = sta
 | `turnDone` | `D` | `outcome` が中断/失敗に決まった (以後は待たない) |
 | `outcome` | `D` / SIGTERM / 401 / ws 切断 / 不正 frame / `reviewThreadId` 不一致 / `run()` の例外 | 必ず決まる |
 
-`outcome` を待つ 1 箇所の `switch` が、中断なら `turn` を (`startSettled` で確定するまで) 待ち、
-review では `child` を上の条件で待ってから、子 → 親の順に `turn/interrupt` を送る。interrupt の
-応答待ちと handshake 待ちは締切超過を例外 (`TimeoutError` / `AbortError`) として扱い、理由を
-出して終了する。待ちは node 組み込み (`events.once` + `AbortSignal.timeout`、`timers/promises`、
+`outcome` を待つ 1 箇所の `switch` が、中断なら `turn` を (`run()` の終了 = `runSettled` で確定
+するまで) 待ち、review では `child` を上の条件で待ってから、子 → 親の順に `turn/interrupt` を送る。
+start 要求が応答待ちのまま中断された場合だけは、その応答が持つ 30 秒の締切を待たず短い締切で
+打ち切り「turn が始まっているかもしれない」と報告する (TaskStop が固まって見えないため)。
+interrupt の応答待ち・handshake 待ち・この締切は、超過を例外 (`TimeoutError` / `AbortError`)
+として扱い、理由を出して終了する。待ちは node 組み込み (`events.once` + `AbortSignal.timeout`、`timers/promises`、
 `Promise.withResolvers`) で書き、自前のタイマー管理は持たない。
 `tests/codex-turn.test.mjs` の SIGTERM・401 のテスト群が各セルを pin している。
 

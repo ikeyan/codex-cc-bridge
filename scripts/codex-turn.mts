@@ -328,7 +328,7 @@ const progress = (event: string, detail: Record<string, unknown>): void => {
 // --- Connection and JSON-RPC plumbing ----------------------------------------
 
 // Node's built-in WebSocket (undici) supports the non-standard `headers` option.
-const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } } as never);
+const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } });
 let nextId = 1;
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -770,12 +770,20 @@ async function run(): Promise<TurnCompletedParams> {
 
 /** Interrupt what we own, child first (interrupting the parent alone does not reach it,
  * measured). Each wait ends when the grammar says the value is decided, not on a guess:
- * `turn` once run() has ended (a decided outcome cuts run() short, so this is prompt);
+ * `turn` once run() has ended (a decided outcome cuts preflight short, so this is prompt
+ * unless a start request is in flight, which gets a short deadline of its own);
  * `child` once it announces itself or our turn
  * is over — plus a short bound, since a child that is coming does so right after the start
  * response. Throws when the interrupt could not be confirmed. */
 async function interruptOwned(): Promise<void> {
-  await Promise.race([turn.promise, runSettled.promise]);
+  // A start request that is still unanswered decides `turn` on its own (30 s) timeout; a
+  // cancel must not look stuck for that long, so give the decision a short deadline and
+  // otherwise report that the turn may have started.
+  await withTimeout(
+    Promise.race([turn.promise, runSettled.promise]),
+    3000,
+    "waiting for the turn/start response to know what to interrupt",
+  );
   const ours = turn.value;
   if (ours === undefined) throw new Error("no turn was started, so there is nothing to interrupt");
   const kid = reviewMode === undefined ? undefined : await Promise.race([

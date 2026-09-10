@@ -1221,7 +1221,7 @@ test("SIGTERM during preflight stops the run before any thread or turn is create
   assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
 });
 
-test("SIGTERM while turn/start is unanswered waits for that request to settle, then reports", async () => {
+test("SIGTERM while turn/start is unanswered gives the response a short deadline, then reports", async () => {
   const recorded = [];
   let child;
   const server = await startMockServer((msg, send) => {
@@ -1234,20 +1234,22 @@ test("SIGTERM while turn/start is unanswered waits for that request to settle, t
     appServerBehaviour(recorded)(msg, send);
   });
   const result = new Promise((resolve) => {
-    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {
-      CODEX_BRIDGE_CONTROL_TIMEOUT_MS: "500",
-    });
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
     let stderr = "";
     child.stderr.on("data", (d) => (stderr += d));
     child.on("close", (code) => resolve({ code, stderr }));
     child.stdin.write("x");
     child.stdin.end();
   });
+  const started = Date.now();
   const r = await result;
   server.close();
   assert.equal(r.code, 130, r.stderr);
-  // The abort cuts the pending start request short; nothing was started.
-  assert.match(r.stderr, /nothing to interrupt/);
+  // The start request keeps its own 30 s timeout, but a cancel must not wait that long:
+  // the decision gets a short deadline and the uncertainty is reported.
+  assert.ok(Date.now() - started < 8000, "cancel must not wait for the control-plane timeout");
+  assert.match(r.stderr, /turn\/start response/);
+  assert.match(r.stderr, /may still be running/);
   assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
 });
 
