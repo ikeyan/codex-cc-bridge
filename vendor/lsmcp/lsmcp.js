@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-B-h8l8uA.js";
-import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-D_NupzB2.js";
+import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-MZR2qMTi.js";
+import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-DuccsujO.js";
 import { debugLogWithPrefix, errorLog, mcpDebugWithPrefix } from "./debugLog-LfbHS9a2.js";
 import "./configLoader-CZlYj_hr.js";
 import "./NodeFileSystemApi-CcTrKwya.js";
@@ -276,10 +276,8 @@ function getNodeModulesCommand(binName, args = [], projectRoot) {
 * when it is not installed or its package.json cannot be read.
 */
 function installedPackageMajor(nodeModulesDir, packageName) {
-	const packageJsonPath = join$1(nodeModulesDir, packageName, "package.json");
-	if (!existsSync$1(packageJsonPath)) return void 0;
 	try {
-		const { version } = JSON.parse(readFileSync(packageJsonPath, "utf-8"));
+		const { version } = JSON.parse(readFileSync(join$1(nodeModulesDir, packageName, "package.json"), "utf-8"));
 		const major = parseInt(String(version), 10);
 		return Number.isNaN(major) ? void 0 : major;
 	} catch {
@@ -289,6 +287,18 @@ function installedPackageMajor(nodeModulesDir, packageName) {
 
 //#endregion
 //#region src/utils/binFinder.ts
+/** Binary names and args to search in this node_modules, applying `override`. */
+function candidatesIn(nodeModules, item, defaultArgs) {
+	const override = item.override;
+	if (override && (installedPackageMajor(nodeModules, override.package) ?? -Infinity) >= override.minMajor) return {
+		names: override.names,
+		args: override.args ?? defaultArgs
+	};
+	return {
+		names: item.names,
+		args: defaultArgs
+	};
+}
 /** `dir` followed by each of its ancestors up to the filesystem root. */
 function* selfAndAncestors(dir) {
 	let current = dir;
@@ -348,27 +358,19 @@ function findBinary(strategy, projectRoot = process.cwd()) {
 				break;
 			}
 			case "node_modules": {
-				const args = item.args ?? defaultArgs;
-				for (const name of item.names) for (const dir of selfAndAncestors(projectRoot)) {
+				for (const dir of selfAndAncestors(projectRoot)) {
 					const nodeModules = join$1(dir, "node_modules");
-					const bin = join$1(nodeModules, ".bin", name);
-					if (!existsSync$1(bin)) continue;
-					if (item.requires) {
-						const major = installedPackageMajor(nodeModules, item.requires.package);
-						if (major === void 0) {
-							mcpDebugWithPrefix("BinFinder", `Skipping ${bin}: ${item.requires.package} is not installed there`);
-							continue;
-						}
-						if (major < item.requires.minMajor) {
-							mcpDebugWithPrefix("BinFinder", `Skipping ${bin}: requires ${item.requires.package} >= ${item.requires.minMajor}, found ${major}`);
-							break;
+					const { names, args } = candidatesIn(nodeModules, item, defaultArgs);
+					for (const name of names) {
+						const bin = join$1(nodeModules, ".bin", name);
+						if (existsSync$1(bin)) {
+							mcpDebugWithPrefix("BinFinder", `Found in node_modules: ${bin}`);
+							return {
+								command: bin,
+								args
+							};
 						}
 					}
-					mcpDebugWithPrefix("BinFinder", `Found in node_modules: ${bin}`);
-					return {
-						command: bin,
-						args
-					};
 				}
 				break;
 			}
@@ -567,7 +569,7 @@ async function runLanguageServerWithConfig(config, _positionals = [], customEnv)
 			supportsIncrementalSync: config.serverCharacteristics.supportsIncrementalSync,
 			supportsPullDiagnostics: config.serverCharacteristics.supportsPullDiagnostics
 		} : void 0;
-		const { createAndInitializeLSPClient } = await import("./src-D9h8VREI.js");
+		const { createAndInitializeLSPClient } = await import("./src-DHi6E6Kh.js");
 		const lspClient = await createAndInitializeLSPClient(projectRoot, lspProcess, config.id || config.preset || "custom", config.initializationOptions, serverChars);
 		const { NodeFileSystemApi } = await import("./NodeFileSystemApi-Cv425szp.js");
 		const fileSystemApi = new NodeFileSystemApi();
@@ -1710,7 +1712,7 @@ async function listTools(presetName, disableList) {
 			config = result.config;
 			console.log(`Preset: ${presetName}\n`);
 		}
-		const { getAllAvailableTools } = await import("./getAllTools-Ic1HnKtj.js");
+		const { getAllAvailableTools } = await import("./getAllTools-C4VCV4fs.js");
 		const { filterUnsupportedTools: filterUnsupportedTools$1 } = await import("./toolFilters-DnaKbFIC.js");
 		const allTools = await getAllAvailableTools(config);
 		let filteredTools = allTools;
