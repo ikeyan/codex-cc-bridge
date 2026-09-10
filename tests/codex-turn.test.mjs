@@ -189,7 +189,10 @@ test("review: a reviewThreadId other than our thread fails closed instead of han
       send({
         jsonrpc: "2.0",
         id: msg.id,
-        result: { reviewThreadId: "review-thread", turn: { id: "turn-1" } },
+        result: {
+          reviewThreadId: "review-thread",
+          turn: { id: "turn-1", status: "inProgress", items: [] },
+        },
       });
       // The moved review's child announces itself on the moved thread.
       setTimeout(
@@ -197,7 +200,10 @@ test("review: a reviewThreadId other than our thread fails closed instead of han
           send({
             jsonrpc: "2.0",
             method: "turn/started",
-            params: { threadId: "review-thread", turn: { id: "child-turn", status: "inProgress" } },
+            params: {
+              threadId: "review-thread",
+              turn: { id: "child-turn", status: "inProgress", items: [] },
+            },
           }),
         100,
       );
@@ -236,12 +242,18 @@ test("moved review: a child turn/started that precedes the review/start response
       send({
         jsonrpc: "2.0",
         method: "turn/started",
-        params: { threadId: "review-thread", turn: { id: "child-turn", status: "inProgress" } },
+        params: {
+          threadId: "review-thread",
+          turn: { id: "child-turn", status: "inProgress", items: [] },
+        },
       });
       send({
         jsonrpc: "2.0",
         id: msg.id,
-        result: { reviewThreadId: "review-thread", turn: { id: "turn-1" } },
+        result: {
+          reviewThreadId: "review-thread",
+          turn: { id: "turn-1", status: "inProgress", items: [] },
+        },
       });
       return;
     }
@@ -667,7 +679,10 @@ test("SIGTERM during a review interrupts the subagent child turn as well as ours
         send({
           jsonrpc: "2.0",
           method: "turn/started",
-          params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+          params: {
+            threadId: "thread-1",
+            turn: { id: "child-turn", status: "inProgress", items: [] },
+          },
         });
         setTimeout(() => child.kill("SIGTERM"), 150);
       },
@@ -710,7 +725,10 @@ test("SIGTERM before the review child's turn/started arrives still waits for and
             send({
               jsonrpc: "2.0",
               method: "turn/started",
-              params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+              params: {
+                threadId: "thread-1",
+                turn: { id: "child-turn", status: "inProgress", items: [] },
+              },
             }),
           400,
         );
@@ -780,7 +798,7 @@ test("every announced subagent turn of a plain turn is interrupted, then ours", 
           send({
             jsonrpc: "2.0",
             method: "turn/started",
-            params: { threadId: "thread-1", turn: { id, status: "inProgress" } },
+            params: { threadId: "thread-1", turn: { id, status: "inProgress", items: [] } },
           });
         }
         setTimeout(() => child.kill("SIGTERM"), 150);
@@ -848,6 +866,123 @@ test("notifications that do not have their method's shape are ignored, not crash
   assert.deepEqual(out.childTurnIds, []);
 });
 
+test("null-serialized optional fields (phase, exitCode, codexErrorInfo) are accepted", async () => {
+  // The server writes an absent Option as null (schema: nullable). None of these may be
+  // rejected at the boundary, or turn/completed would never be accepted and the run hangs.
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        send({
+          jsonrpc: "2.0",
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            willRetry: true,
+            error: { message: "transient", codexErrorInfo: null },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: {
+              type: "commandExecution",
+              id: "c1",
+              command: "ls",
+              status: "completed",
+              exitCode: null,
+            },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: { type: "agentMessage", id: "m1", text: "no phase", phase: null },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: {
+              id: "turn-1",
+              status: "completed",
+              error: null,
+              items: [{ type: "agentMessage", id: "m1", text: "no phase", phase: null }],
+            },
+          },
+        });
+      },
+    }),
+  );
+  const t0 = Date.now();
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).finalMessage, "no phase");
+  assert.ok(Date.now() - t0 < 1500);
+});
+
+test('a 401 delivered as the bare code "unauthorized" aborts like an HTTP 401', async () => {
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) =>
+        send({
+          jsonrpc: "2.0",
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            willRetry: true,
+            error: { message: "Unauthorized", codexErrorInfo: "unauthorized" },
+          },
+        }),
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /401 Unauthorized/);
+  assert.equal(findRequest(recorded, "turn/interrupt").params.turnId, "turn-1");
+});
+
+test("a server->client request with a string id is still denied (RequestId is string|int)", async () => {
+  const denials = {};
+  const server = await startMockServer((msg, send) => {
+    if (msg.id === "srv-1") {
+      denials[msg.id] = msg.result ?? msg.error;
+      send({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
+      });
+      return;
+    }
+    appServerBehaviour([], {
+      onTurnStart: (s) =>
+        s({
+          jsonrpc: "2.0",
+          id: "srv-1",
+          method: "item/commandExecution/requestApproval",
+          params: {},
+        }),
+    })(msg, send);
+  });
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(denials["srv-1"], { decision: "decline" });
+});
+
 test("a plain turn's already-announced subagent turn is interrupted too, without any wait", async () => {
   const recorded = [];
   let child;
@@ -857,7 +992,10 @@ test("a plain turn's already-announced subagent turn is interrupted too, without
         send({
           jsonrpc: "2.0",
           method: "turn/started",
-          params: { threadId: "thread-1", turn: { id: "sub-turn", status: "inProgress" } },
+          params: {
+            threadId: "thread-1",
+            turn: { id: "sub-turn", status: "inProgress", items: [] },
+          },
         });
         setTimeout(() => child.kill("SIGTERM"), 150);
       },
@@ -925,13 +1063,22 @@ test("SIGTERM racing the turn/start response still interrupts the turn", async (
         result: { exitCode: 0, stdout: "BLOCKED BLOCKED WRITABLE\n", stderr: "" },
       });
     } else if (msg.method === "thread/start") {
-      send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { thread: { id: "thread-1" }, model: "mock-model" },
+      });
     } else if (msg.method === "turn/start") {
       // The server accepted the turn but the response is slow: kill the driver
       // first, answer afterwards.
       setTimeout(() => child.kill("SIGTERM"), 50);
       setTimeout(
-        () => send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "turn-1" } } }),
+        () =>
+          send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: { turn: { id: "turn-1", status: "inProgress", items: [] } },
+          }),
         400,
       );
     } else {
@@ -964,7 +1111,10 @@ test("a 401 during a review interrupts the child turn as well as ours", async ()
         send({
           jsonrpc: "2.0",
           method: "turn/started",
-          params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+          params: {
+            threadId: "thread-1",
+            turn: { id: "child-turn", status: "inProgress", items: [] },
+          },
         });
         send({
           jsonrpc: "2.0",
@@ -973,7 +1123,10 @@ test("a 401 during a review interrupts the child turn as well as ours", async ()
             threadId: "thread-1",
             turnId: "child-turn",
             willRetry: true,
-            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+            error: {
+              message: "auth",
+              codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } },
+            },
           },
         });
       },
@@ -998,7 +1151,10 @@ test("a review child turn/started arriving before the review/start response is n
         send({
           jsonrpc: "2.0",
           method: "turn/started",
-          params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+          params: {
+            threadId: "thread-1",
+            turn: { id: "child-turn", status: "inProgress", items: [] },
+          },
         });
       },
       onTurnStart: () => setTimeout(() => child.kill("SIGTERM"), 150),
@@ -1031,7 +1187,10 @@ test("review result carries the child turn id for turn-context", async () => {
         send({
           jsonrpc: "2.0",
           method: "turn/started",
-          params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+          params: {
+            threadId: "thread-1",
+            turn: { id: "child-turn", status: "inProgress", items: [] },
+          },
         });
         send({
           jsonrpc: "2.0",
@@ -1073,7 +1232,10 @@ test("the 401 explanation survives a turn/completed racing the interrupt respons
           params: {
             threadId: "thread-1",
             turnId: "turn-1",
-            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+            error: {
+              message: "auth",
+              codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } },
+            },
           },
         }),
     })(msg, send);
@@ -1094,7 +1256,11 @@ test("a 401 arriving before the turn/start response still interrupts the turn", 
           method: "error",
           params: {
             threadId: "thread-1",
-            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+            turnId: "turn-1",
+            error: {
+              message: "auth",
+              codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } },
+            },
           },
         }),
       onTurnStart: () => {},
@@ -1117,7 +1283,11 @@ test("repeated 401s while the turn/start response is pending still end in an int
     method: "error",
     params: {
       threadId: "thread-1",
-      error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+      turnId: "turn-1",
+      error: {
+        message: "auth",
+        codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } },
+      },
     },
   };
   const server = await startMockServer((msg, send) => {
@@ -1129,7 +1299,12 @@ test("repeated 401s while the turn/start response is pending still end in an int
       setTimeout(() => send(err), 100);
       setTimeout(() => send(err), 200);
       setTimeout(
-        () => send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "turn-1" } } }),
+        () =>
+          send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: { turn: { id: "turn-1", status: "inProgress", items: [] } },
+          }),
         400,
       );
       return;
@@ -1157,7 +1332,10 @@ test("a 401 for a turn that is not ours is ignored", async () => {
           params: {
             threadId: "thread-1",
             turnId: "unrelated-turn",
-            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+            error: {
+              message: "auth",
+              codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } },
+            },
           },
         });
         send({
@@ -1196,7 +1374,10 @@ test("a 401 before the review child announces itself still waits for and interru
           params: {
             threadId: "thread-1",
             turnId: "child-turn", // the child's own 401, before its turn/started
-            error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+            error: {
+              message: "auth",
+              codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } },
+            },
           },
         });
         setTimeout(
@@ -1204,7 +1385,10 @@ test("a 401 before the review child announces itself still waits for and interru
             send({
               jsonrpc: "2.0",
               method: "turn/started",
-              params: { threadId: "thread-1", turn: { id: "child-turn", status: "inProgress" } },
+              params: {
+                threadId: "thread-1",
+                turn: { id: "child-turn", status: "inProgress", items: [] },
+              },
             }),
           300,
         );
@@ -1392,9 +1576,17 @@ test("server->client requests get schema-valid denials (fail closed)", async () 
         result: { exitCode: 0, stdout: "BLOCKED BLOCKED WRITABLE\n", stderr: "" },
       });
     } else if (msg.method === "thread/start") {
-      send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { thread: { id: "thread-1" }, model: "mock-model" },
+      });
     } else if (msg.method === "turn/start") {
-      send({ jsonrpc: "2.0", id: msg.id, result: { turn: { id: "turn-1" } } });
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { turn: { id: "turn-1", status: "inProgress", items: [] } },
+      });
       send({
         jsonrpc: "2.0",
         id: 901,

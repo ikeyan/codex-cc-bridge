@@ -104,6 +104,9 @@ export const isReadonlyArrayOf =
 export const isUndefinedableOf =
   <T,>(guard: (value: unknown) => value is T) => (value: unknown): value is T | undefined =>
     value === undefined || guard(value);
+export const isNullableOf =
+  <T,>(guard: (value: unknown) => value is T) => (value: unknown): value is T | null =>
+    value === null || guard(value);
 const sizeGetterOfMap: (() => unknown) | undefined = Object.getOwnPropertyDescriptor(
   Map.prototype,
   "size",

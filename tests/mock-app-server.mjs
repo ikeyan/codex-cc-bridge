@@ -144,7 +144,11 @@ export function appServerBehaviour(
         result: { exitCode: 0, stdout: probeStdout + "\n", stderr: "" },
       });
     } else if (msg.method === "thread/start" || msg.method === "thread/resume") {
-      send({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "thread-1" } } });
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { thread: { id: "thread-1" }, model: "mock-model" },
+      });
     } else if (msg.method === "turn/start" || msg.method === "review/start") {
       // Notifications the server may emit before its own response reaches the client.
       if (beforeTurnStartResponse) beforeTurnStartResponse(send);
@@ -152,7 +156,7 @@ export function appServerBehaviour(
         jsonrpc: "2.0",
         id: msg.id,
         result: turnStartResult ??
-          { reviewThreadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } },
+          { reviewThreadId: "thread-1", turn: { id: "turn-1", status: "inProgress", items: [] } },
       });
       if (turnStartResult) return;
       if (onTurnStart) {

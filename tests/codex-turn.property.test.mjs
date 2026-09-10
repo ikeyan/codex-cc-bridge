@@ -81,7 +81,10 @@ function eventMessage(kind, i) {
     case "noise:other-thread-completed":
       return {
         method: "turn/completed",
-        params: { threadId: "other-thread", turn: { id: "other-turn", status: "completed" } },
+        params: {
+          threadId: "other-thread",
+          turn: { id: "other-turn", status: "completed", items: [] },
+        },
       };
     case "noise:own-thread-other-turn-item":
       return {
@@ -95,14 +98,17 @@ function eventMessage(kind, i) {
     case "noise:other-thread-started":
       return {
         method: "turn/started",
-        params: { threadId: "other-thread", turn: { id: "other-child", status: "inProgress" } },
+        params: {
+          threadId: "other-thread",
+          turn: { id: "other-child", status: "inProgress", items: [] },
+        },
       };
   }
   throw new Error(`unknown event ${kind}`);
 }
 const childStarted = {
   method: "turn/started",
-  params: { threadId: OWN_THREAD, turn: { id: CHILD_TURN, status: "inProgress" } },
+  params: { threadId: OWN_THREAD, turn: { id: CHILD_TURN, status: "inProgress", items: [] } },
 };
 const completed = {
   method: "turn/completed",
@@ -116,7 +122,10 @@ const unauthorized = {
   params: {
     threadId: OWN_THREAD,
     turnId: OWN_TURN,
-    error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } } },
+    error: {
+      message: "auth",
+      codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 401 } },
+    },
   },
 };
 

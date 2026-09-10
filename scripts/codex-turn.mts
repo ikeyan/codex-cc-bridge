@@ -33,6 +33,7 @@ import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import {
+  isNullableOf,
   isNumber,
   isObjectOf,
   isOneOf,
@@ -55,60 +56,85 @@ type Guarded<G> = G extends (value: unknown) => value is infer T ? T : never;
 /** Property may hold anything (or be absent); we carry it through without looking. */
 const anyValue = (_: unknown): boolean => true;
 const isUnknown = (_: unknown): _ is unknown => true;
+/** The server serializes an absent `Option` as `null` (measured), so "optional" on the wire
+ * means absent, undefined or null. */
 const optString = isUndefinedableOf(isString);
-const optNumber = isUndefinedableOf(isNumber);
+const optNullString = isUndefinedableOf(isNullableOf(isString));
+const optNullNumber = isUndefinedableOf(isNullableOf(isNumber));
 /** The message of anything thrown. Checks for the property rather than for Error-ness:
  * a DOMException is not an Error on every runtime (bun), but it carries a message. */
 const hasMessage = isObjectOf({ message: isString });
 const errorMessage = (e: unknown): string => hasMessage(e) ? e.message : String(e);
 
 const isJsonRpcError = isObjectOf({ code: isNumber, message: isString, data: anyValue });
+/** JSON-RPC ids: ours are numbers; the server may use strings for its own requests. */
+const isRequestId = (v: unknown): v is string | number => isString(v) || isNumber(v);
+/** The fields of a ThreadItem we look at; `phase` and `exitCode` are nullable per schema. */
 const isAgentItem = isObjectOf({
-  type: optString,
-  phase: optString,
+  type: isString,
+  phase: optNullString,
   text: optString,
   command: optString,
   status: optString,
-  exitCode: optNumber,
+  exitCode: optNullNumber,
 });
 const isTurn = isObjectOf({
   id: isString,
-  status: optString,
+  status: isString,
   error: anyValue,
-  items: isUndefinedableOf(isReadonlyArrayOf(isAgentItem)),
+  items: isReadonlyArrayOf(isAgentItem),
 });
 /** Any frame: response (id + result/error), notification (method, no id), or
  * server->client request (id + method). Params are checked per method. */
 const isIncomingMessage = isObjectOf({
-  id: optNumber,
+  id: isUndefinedableOf(isRequestId),
   method: optString,
   params: anyValue,
   result: anyValue,
   error: isUndefinedableOf(isJsonRpcError),
 });
-const isItemCompleted = isObjectOf({ threadId: optString, turnId: optString, item: isAgentItem });
+const isItemCompleted = isObjectOf({ threadId: isString, turnId: isString, item: isAgentItem });
 /** turn/started and turn/completed. */
-const isTurnEvent = isObjectOf({ threadId: optString, turn: isTurn });
+const isTurnEvent = isObjectOf({ threadId: isString, turn: isTurn });
 type TurnEvent = Guarded<typeof isTurnEvent>;
+/** CodexErrorInfo is either a bare code ("unauthorized", "rateLimitExceeded", ...) or an
+ * object naming the failed stage, which may carry the upstream HTTP status. */
+const isHttpStage = isUndefinedableOf(isObjectOf({ httpStatusCode: optNullNumber }));
+const isCodexErrorInfo = (v: unknown): v is Guarded<typeof isCodexErrorObject> | string =>
+  isString(v) || isCodexErrorObject(v);
+const isCodexErrorObject = isObjectOf({
+  responseStreamDisconnected: isHttpStage,
+  responseStreamConnectionFailed: isHttpStage,
+  httpConnectionFailed: isHttpStage,
+});
 const isErrorEvent = isObjectOf({
-  threadId: optString,
-  turnId: optString,
+  threadId: isString,
+  turnId: isString,
+  willRetry: anyValue,
   error: isObjectOf({
-    message: optString,
-    codexErrorInfo: isUndefinedableOf(isObjectOf({
-      responseStreamDisconnected: isUndefinedableOf(isObjectOf({ httpStatusCode: optNumber })),
-    })),
+    message: isString,
+    codexErrorInfo: isUndefinedableOf(isNullableOf(isCodexErrorInfo)),
   }),
 });
-const isTokenUsageEvent = isObjectOf({ threadId: optString, tokenUsage: anyValue });
+/** The server cannot authenticate to OpenAI: either the bare code or a 401 on any stage. */
+const isUnauthorized = (info: Guarded<typeof isCodexErrorInfo> | null | undefined): boolean =>
+  info === "unauthorized" ||
+  (isCodexErrorObject(info) &&
+    [
+      info.responseStreamDisconnected,
+      info.responseStreamConnectionFailed,
+      info.httpConnectionFailed,
+    ]
+      .some((stage) => stage?.httpStatusCode === 401));
+const isTokenUsageEvent = isObjectOf({ threadId: isString, tokenUsage: anyValue });
 const isThreadResponse = isObjectOf({
   thread: isObjectOf({ id: isString }),
   /** Model the server actually resolved for the thread (echoes `model` when we send one). */
-  model: optString,
-  reasoningEffort: isUndefinedableOf((v: unknown): v is string | null => v === null || isString(v)),
+  model: isString,
+  reasoningEffort: optNullString,
 });
 const isTurnStartResponse = isObjectOf({ turn: isTurn });
-const isReviewStartResponse = isObjectOf({ reviewThreadId: optString, turn: isTurn });
+const isReviewStartResponse = isObjectOf({ reviewThreadId: isString, turn: isTurn });
 const isCommandExecResponse = isObjectOf({
   exitCode: isNumber,
   stdout: isString,
@@ -501,7 +527,7 @@ const DENIALS: Record<string, object> = {
   applyPatchApproval: { decision: "abort" },
 };
 
-function handleServerRequest(id: number, method: string): void {
+function handleServerRequest(id: string | number, method: string): void {
   progress("server-request-denied", { method });
   const denial = DENIALS[method];
   if (denial) {
@@ -523,11 +549,10 @@ type Owned = { threadId: string; turnId: string };
 function handleTurnEvent(owned: Owned, method: string, params: unknown): void {
   // Not on the thread we own (child threads spawned by subagents, unrelated threads on a
   // shared server): not ours. Params that do not have the method's shape are not ours either.
-  const onOurThread = (p: { threadId?: string }): boolean =>
-    p.threadId === undefined || p.threadId === owned.threadId;
+  const onOurThread = (p: { threadId: string }): boolean => p.threadId === owned.threadId;
   if (method === "item/completed") {
     if (!isItemCompleted(params) || !onOurThread(params)) return;
-    if (params.turnId !== undefined && params.turnId !== owned.turnId) return;
+    if (params.turnId !== owned.turnId) return;
     const item = params.item;
     if (item.type === "agentMessage") {
       if (item.phase === "final_answer") finalAnswer = item.text ?? "";
@@ -554,17 +579,17 @@ function handleTurnEvent(owned: Owned, method: string, params: unknown): void {
     }
   } else if (method === "error") {
     if (!isErrorEvent(params) || !onOurThread(params)) return;
-    // Ours if it names our turn or a child, or names no turn (thread-level). A review's
-    // child may not be identified yet, so accept unknown turn ids in that window.
+    // Ours if it names our turn or a child. A review's child may not be identified yet, so
+    // accept unknown turn ids in that window.
     const t = params.turnId;
-    const mine = t === undefined || t === owned.turnId || children.has(t) ||
+    const mine = t === owned.turnId || children.has(t) ||
       (reviewMode !== undefined && children.size === 0);
     if (!mine) return;
     progress("error", { detail: params });
     // Codex cannot authenticate to OpenAI (auth.json unreadable under a read-restricted
     // sandbox, or logged out): the server retries forever and the turn never completes
     // (measured), so waiting is pointless.
-    if (params.error.codexErrorInfo?.responseStreamDisconnected?.httpStatusCode === 401) {
+    if (isUnauthorized(params.error.codexErrorInfo)) {
       abort(
         "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
           "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
@@ -595,6 +620,7 @@ ws.onmessage = (raw: MessageEvent) => {
   }
   const msg = frame;
   if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
+    if (!isNumber(msg.id)) return; // our requests carry numeric ids
     const p = pending.get(msg.id);
     if (!p) return;
     pending.delete(msg.id);
@@ -624,7 +650,7 @@ ws.onmessage = (raw: MessageEvent) => {
     case "thread/tokenUsage/updated":
       if (
         isTokenUsageEvent(msg.params) && threadId !== undefined &&
-        (msg.params.threadId === undefined || msg.params.threadId === threadId)
+        msg.params.threadId === threadId
       ) {
         usageInfo = msg.params.tokenUsage ?? msg.params;
       }
@@ -761,7 +787,7 @@ async function run(): Promise<TurnEvent> {
   // this proves the parameter was accepted, not that the model exists.
   progress("thread", {
     threadId,
-    model: resolved.model ?? null,
+    model: resolved.model,
     effort: resolved.reasoningEffort ?? null,
   });
 
@@ -871,7 +897,7 @@ switch (result.kind) {
     const t = result.params.turn;
     let finalMessage: string | null = finalAnswer ?? lastAgentMessage;
     if (finalMessage === null) {
-      const items = (t.items ?? []).filter((i) => i.type === "agentMessage");
+      const items = t.items.filter((i) => i.type === "agentMessage");
       const final = items.find((i) => i.phase === "final_answer") ?? items[items.length - 1];
       if (final) finalMessage = final.text ?? "";
     }
@@ -887,7 +913,7 @@ switch (result.kind) {
           // turn_context lives, so it is the id to give `turn-context` (null if none).
           reviewTurnId: firstChild ?? null,
           childTurnIds: [...children],
-          turnStatus: t.status ?? null,
+          turnStatus: t.status,
           turnError: t.error ?? null,
           finalMessage,
           tokenUsage: usageInfo,
