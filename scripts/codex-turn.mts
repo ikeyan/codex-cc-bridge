@@ -572,7 +572,12 @@ ws.onmessage = (raw: MessageEvent) => {
   // and events for other threads afterwards (child threads spawned by
   // subagents, unrelated threads on a shared server).
   if (threadId === undefined) return;
-  if (params.threadId !== undefined && params.threadId !== threadId) return;
+  // ... or the thread we own, when review/start moved the review elsewhere: its child's
+  // turn/started is tagged with that thread and must still reach the interrupt.
+  const owned = turn.value?.threadId ?? threadId;
+  if (params.threadId !== undefined && params.threadId !== threadId && params.threadId !== owned) {
+    return;
+  }
   switch (msg.method) {
     case "item/completed":
     case "turn/completed":

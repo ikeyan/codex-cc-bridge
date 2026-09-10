@@ -54,7 +54,11 @@ function startMockServer(onMessage) {
     let handshaken = false;
     let buf = Buffer.alloc(0);
     const sendJson = (obj) => {
-      const payload = Buffer.from(JSON.stringify(obj), "utf8");
+      // { __raw } sends the text verbatim (to test frames that are not JSON).
+      const payload = Buffer.from(
+        typeof obj?.__raw === "string" ? obj.__raw : JSON.stringify(obj),
+        "utf8",
+      );
       let header;
       if (payload.length < 126) {
         header = Buffer.from([0x81, payload.length]);
@@ -366,11 +370,30 @@ test("review: a reviewThreadId other than our thread fails closed instead of han
   // arrives on that threadId. A different reviewThreadId would mean events we have no
   // buffer for; refuse rather than wait forever.
   const recorded = [];
-  const server = await startMockServer(
-    appServerBehaviour(recorded, {
-      turnStartResult: { reviewThreadId: "review-thread", turn: { id: "turn-1" } },
-    }),
-  );
+  const server = await startMockServer((msg, send) => {
+    if (msg.id === undefined) return;
+    if (msg.method === "review/start") {
+      recorded.push(msg); // the fallthrough below records the rest itself
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { reviewThreadId: "review-thread", turn: { id: "turn-1" } },
+      });
+      // The moved review's child announces itself on the moved thread.
+      setTimeout(
+        () =>
+          send({
+            jsonrpc: "2.0",
+            method: "turn/started",
+            params: { threadId: "review-thread", turn: { id: "child-turn", status: "inProgress" } },
+          }),
+        100,
+      );
+      return;
+    }
+    appServerBehaviour(recorded)(msg, send);
+  });
+  const t0 = Date.now();
   const r = await runDriver(
     ["--cwd", "/tmp", "--review", "uncommitted"],
     { port: server.port },
@@ -378,11 +401,50 @@ test("review: a reviewThreadId other than our thread fails closed instead of han
   server.close();
   assert.equal(r.code, 1);
   assert.match(r.stderr, /review-thread/);
-  // The server had already accepted the review: it is interrupted where it went, not left.
+  // The server had already accepted the review: it is interrupted where it went, child
+  // first (interrupting the parent alone does not stop the child), not left running.
+  assert.deepEqual(
+    recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params),
+    [
+      { threadId: "review-thread", turnId: "child-turn" },
+      { threadId: "review-thread", turnId: "turn-1" },
+    ],
+  );
+  assert.ok(Date.now() - t0 < 1500, "child known: no waiting");
+});
+
+test("a frame that is not JSON aborts (with interrupt) instead of crashing", async () => {
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => send.raw?.("this is not json") ?? send({ __raw: "this is not json" }),
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /not JSON/);
   assert.deepEqual(findRequest(recorded, "turn/interrupt").params, {
-    threadId: "review-thread",
+    threadId: "thread-1",
     turnId: "turn-1",
   });
+});
+
+test("unreadable --target-file and unparsable --schema are usage errors, not stack traces", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-turn-bad-"));
+  const badSchema = join(dir, "schema.json");
+  writeFileSync(badSchema, "{ not json");
+  const missing = join(dir, "missing.txt");
+  const cases = [
+    [["--review", "base", "--target-file", missing], /--target-file .*ENOENT/],
+    [["--schema", badSchema], /--schema .*JSON/],
+  ];
+  for (const [args, re] of cases) {
+    const r = await runDriver(["--cwd", "/tmp", ...args], { stdin: "x", session: makeSession(1) });
+    assert.equal(r.code, 2, args.join(" "));
+    assert.match(r.stderr, re, args.join(" "));
+    assert.doesNotMatch(r.stderr, /\n\s+at /, "no stack trace");
+  }
 });
 
 test("thread/start tells codex it is inside the Claude sandbox", async () => {

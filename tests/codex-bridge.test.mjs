@@ -145,6 +145,16 @@ test("ready: server exited before listening => exit 1 with its output", async ()
   assert.equal(existsSync(join(dir, "port")), false);
 });
 
+test("ready: a banner port outside 1-65535 is rejected, not published", async () => {
+  const dir = (await run(["init"], { TMPDIR: scratch() })).stdout.trim();
+  const out = join(scratch(), "task.output");
+  writeFileSync(out, "listening on: ws://127.0.0.1:70000\n");
+  const r = await run(["ready", dir, out]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /not a TCP port/);
+  assert.equal(existsSync(join(dir, "port")), false);
+});
+
 test("ready: no banner within the deadline => exit 1, no port published", async () => {
   const dir = (await run(["init"], { TMPDIR: scratch() })).stdout.trim();
   const out = join(scratch(), "task.output");

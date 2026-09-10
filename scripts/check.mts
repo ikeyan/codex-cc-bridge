@@ -64,6 +64,7 @@ const steps: Step[] = [
       "scripts/codex-turn.mts",
       "scripts/codex-bridge.mts",
       "scripts/check.mts",
+      "scripts/wiki-symbols.mts",
     ],
   },
   {
@@ -77,6 +78,8 @@ const steps: Step[] = [
   // ずれていないかを --check で見る (書き込まない)。lint は desc 欠落・リンク切れ等。
   { name: "wiki  index drift", cmd: [...UV_WIKI, "update", "--check"], env: UV_ENV, hint: UV_HINT },
   { name: "wiki  lint", cmd: [...UV_WIKI, "lint"], env: UV_ENV, hint: UV_HINT },
+  // wiki が名指しする識別子がコードに残っているか (リファクタ後の名前残りを捕まえる)。
+  { name: "wiki  symbols", cmd: ["node", "scripts/wiki-symbols.mts"] },
   { name: "sync  REVIEW.md", cmd: ["sh", "-c", reviewSync] },
 ];
 

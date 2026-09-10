@@ -21,7 +21,7 @@ updated: 2026-09-06T07:10:31Z
 1. 自分の `threadId` が確定するまでは thread/turn スコープの通知を**すべて捨てる**。
 2. `params.threadId` が自分のものと違う通知を捨てる (サブエージェントが張った子 thread、
    同じ server 上の無関係な thread)。
-3. `turnId` (`turn/completed` では `params.turn.id`) が `activeTurnId` と違うものを捨てる。
+3. `turnId` (`turn/completed` では `params.turn.id`) が自 turn (`turn`) と違うものを捨てる。
 
 3 段目が無いと、**他人の turn の完了で自分が完了扱いになる**。これは黙って誤った結果を返す
 バグになるので、テストで pin してある (`tests/codex-turn.test.mjs` の
@@ -30,16 +30,19 @@ updated: 2026-09-06T07:10:31Z
 ## turn id 確定前に届くイベント
 
 `turn/start` の応答と、その turn の `item/completed` が**同じ TCP チャンクで届くことがある**。
-このとき `await` はまだ戻っておらず `activeTurnId` は `null` なので、素直に書くと 3 段目の
-フィルタが自分のイベントを捨ててしまう。そこで `activeTurnId === null` の間の thread スコープ
+このとき `await` はまだ戻っておらず自 turn (`turn`) は未定なので、素直に書くと 3 段目の
+フィルタが自分のイベントを捨ててしまう。そこで `turn` が決まるまでの間の thread スコープ
 イベントを `earlyEvents` に溜め、turn id が決まった時点で `turnIdentified()` が**同じハンドラに
 replay** する。バッファは 1 箇所・replay 先は 1 経路に保ってあり、フィルタのロジックは二重化しない。
 
 ## タイムアウトの非対称
 
-制御系 RPC (`initialize` / `thread/start` / `thread/resume` / `turn/start` / `review/start`) は
-`controlRequest` が `CONTROL_TIMEOUT_MS` (既定 30 秒) で、[[security/containment-probe|プローブ]]の
-`command/exec` はさらに短い `PROBE_TIMEOUT_MS` (15 秒) で切る。一方
+制御系 RPC は `CONTROL_TIMEOUT_MS` (既定 30 秒) で切るが、中断との関係で 2 種類に分かれる。
+preflight (`initialize` / `thread/start` / `thread/resume`、[[security/containment-probe|プローブ]]の
+`command/exec` はさらに短い `PROBE_TIMEOUT_MS` = 15 秒) は `controlRequest` で、`outcome` が決まった
+時点で打ち切られる (中断後に thread を作る無駄をしない)。start 要求 (`turn/start` / `review/start`)
+は `boundedRequest` で、送った後は打ち切らない — server が受理していれば interrupt 対象であり、
+その応答か timeout だけがそれを教えるから (中断側は下の「短い締切」で待ち過ぎを防ぐ)。一方
 **turn の完了待ちだけは無制限**にしてある。レビュー turn は 10 分を超えるのが普通で、
 ここに締切を置くと正常な長考をハングと誤判定するため。「応答が来ないこと」と「考え続けていること」
 を混同しない、という切り分けがこの非対称の意味。
