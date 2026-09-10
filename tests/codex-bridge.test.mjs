@@ -145,6 +145,35 @@ test("ready: server exited before listening => exit 1 with its output", async ()
   assert.equal(existsSync(join(dir, "port")), false);
 });
 
+test("ready: server that exits after its banner is reported, not polled to the deadline", async () => {
+  // Grab a free port and release it so nothing answers /readyz there.
+  const probe = net.createServer();
+  const port = await new Promise((res) =>
+    probe.listen(0, "127.0.0.1", () => {
+      const p = probe.address().port;
+      probe.close(() => res(p));
+    })
+  );
+  const dir = (await run(["init"], { TMPDIR: scratch() })).stdout.trim();
+  const out = join(scratch(), "task.output");
+  writeFileSync(out, `listening on: ws://127.0.0.1:${port}\n`);
+  setTimeout(
+    () =>
+      writeFileSync(
+        out,
+        `listening on: ws://127.0.0.1:${port}\nfatal: boom\n\n[exited with code 1]\n`,
+      ),
+    400,
+  );
+  const t0 = Date.now();
+  const r = await run(["ready", dir, out]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /exited after it started listening/);
+  assert.match(r.stderr, /boom/);
+  assert.ok(Date.now() - t0 < 5000, "must not poll until the 30 s deadline");
+  assert.equal(existsSync(join(dir, "port")), false);
+});
+
 test("ready: a banner port outside 1-65535 is rejected, not published", async () => {
   const dir = (await run(["init"], { TMPDIR: scratch() })).stdout.trim();
   const out = join(scratch(), "task.output");

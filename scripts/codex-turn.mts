@@ -492,7 +492,11 @@ function handleServerRequest(msg: IncomingMessage): void {
 // until our turn is identified, then replay through the same handler.
 const earlyEvents: { method: string; params: NotificationParams }[] = [];
 function handleTurnEvent(method: string, params: NotificationParams): void {
-  const ours = turn.value?.turnId;
+  const owned = turn.value!;
+  // Not on the thread we own (child threads spawned by subagents, unrelated threads on a
+  // shared server): not ours.
+  if (params.threadId !== undefined && params.threadId !== owned.threadId) return;
+  const ours = owned.turnId;
   if (method === "item/completed") {
     if (params.turnId !== undefined && params.turnId !== ours) return;
     const item = params.item ?? {};
@@ -568,28 +572,24 @@ ws.onmessage = (raw: MessageEvent) => {
     return;
   }
   const params: NotificationParams = msg.params ?? {};
-  // Ignore all thread/turn-scoped events until our own thread is identified,
-  // and events for other threads afterwards (child threads spawned by
-  // subagents, unrelated threads on a shared server).
-  if (threadId === undefined) return;
-  // ... or the thread we own, when review/start moved the review elsewhere: its child's
-  // turn/started is tagged with that thread and must still reach the interrupt.
-  const owned = turn.value?.threadId ?? threadId;
-  if (params.threadId !== undefined && params.threadId !== threadId && params.threadId !== owned) {
-    return;
-  }
   switch (msg.method) {
     case "item/completed":
     case "turn/completed":
     case "turn/started":
     case "error":
-      // All four are filtered by turn id, and all can share a TCP chunk with the
-      // turn/start (review/start) response, i.e. arrive before our turn id is known.
+      // Turn-scoped events are filtered by thread and turn inside handleTurnEvent, which
+      // needs `turn` (our turn and the thread it lives on). Until that is known, buffer them
+      // unfiltered: the thread a review's child reports may only be known from the
+      // review/start response, which the child's turn/started can precede on the wire.
       if (turn.value === undefined) earlyEvents.push({ method: msg.method, params });
       else handleTurnEvent(msg.method, params);
       break;
     case "thread/tokenUsage/updated":
-      usageInfo = params.tokenUsage ?? params ?? null;
+      if (
+        threadId !== undefined && (params.threadId === undefined || params.threadId === threadId)
+      ) {
+        usageInfo = params.tokenUsage ?? params ?? null;
+      }
       break;
     default:
       break;

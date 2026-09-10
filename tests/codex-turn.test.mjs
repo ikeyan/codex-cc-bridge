@@ -413,6 +413,42 @@ test("review: a reviewThreadId other than our thread fails closed instead of han
   assert.ok(Date.now() - t0 < 1500, "child known: no waiting");
 });
 
+test("moved review: a child turn/started that precedes the review/start response is kept", async () => {
+  // The documented `C S` ordering, on the moved thread: before the response, nothing knows
+  // that thread is ours, so the event must be buffered unfiltered.
+  const recorded = [];
+  const server = await startMockServer((msg, send) => {
+    if (msg.id === undefined) return;
+    if (msg.method === "review/start") {
+      recorded.push(msg);
+      send({
+        jsonrpc: "2.0",
+        method: "turn/started",
+        params: { threadId: "review-thread", turn: { id: "child-turn", status: "inProgress" } },
+      });
+      send({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { reviewThreadId: "review-thread", turn: { id: "turn-1" } },
+      });
+      return;
+    }
+    appServerBehaviour(recorded)(msg, send);
+  });
+  const t0 = Date.now();
+  const r = await runDriver(["--cwd", "/tmp", "--review", "uncommitted"], { port: server.port });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.deepEqual(
+    recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params),
+    [
+      { threadId: "review-thread", turnId: "child-turn" },
+      { threadId: "review-thread", turnId: "turn-1" },
+    ],
+  );
+  assert.ok(Date.now() - t0 < 1500, "child known from the buffer: no waiting");
+});
+
 test("a frame that is not JSON aborts (with interrupt) instead of crashing", async () => {
   const recorded = [];
   const server = await startMockServer(

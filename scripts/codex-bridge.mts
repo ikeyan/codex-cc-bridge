@@ -111,16 +111,22 @@ async function ready(dir: string, outputFile: string): Promise<void> {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   let port: string | undefined;
   while (Date.now() < deadline) {
+    // The task's output file may not exist yet in the first moments.
+    let text = "";
+    try {
+      text = fs.readFileSync(outputFile, "utf8");
+    } catch { /* not created yet */ }
+    // An exit is fatal whether it happens before or after the banner: a server that printed
+    // "listening on" and then died would otherwise be polled until the deadline.
+    if (/^\[exited with code /m.test(text)) {
+      fail(
+        `the app-server exited ${
+          port === undefined ? "before it started listening" : "after it started listening"
+        }. Its output:\n${text.trim()}`,
+      );
+    }
     if (port === undefined) {
-      // The task's output file may not exist yet in the first moments.
-      let text = "";
-      try {
-        text = fs.readFileSync(outputFile, "utf8");
-      } catch { /* not created yet */ }
       port = LISTENING_RE.exec(text)?.[1];
-      if (port === undefined && /^\[exited with code /m.test(text)) {
-        fail(`the app-server exited before it started listening. Its output:\n${text.trim()}`);
-      }
       if (port !== undefined && (Number(port) < 1 || Number(port) > 65535)) {
         fail(`banner port ${port} is not a TCP port`);
       }
