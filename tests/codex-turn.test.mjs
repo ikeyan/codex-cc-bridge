@@ -773,9 +773,12 @@ test("SIGTERM during a review interrupts the subagent child turn as well as ours
     child.on("close", (code) => resolve({ code, stderr }));
     child.stdin.end();
   });
+  const t0 = Date.now();
   const r = await result;
   server.close();
   assert.equal(r.code, 130, r.stderr);
+  assert.doesNotMatch(r.stderr, /not acknowledged/);
+  assert.ok(Date.now() - t0 < 1500, "known child: no waiting");
   const interrupts = recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params);
   assert.deepEqual(interrupts, [
     { threadId: "thread-1", turnId: "child-turn" },
@@ -845,10 +848,16 @@ test("connection dropping while the interrupt is pending is reported, with the a
     child.stdin.write("x");
     child.stdin.end();
   });
+  const t0 = Date.now();
   const r = await result;
   assert.equal(r.code, 130, r.stderr);
   assert.match(r.stderr, /SIGTERM: turn interrupted/);
-  assert.match(r.stderr, /turn\/interrupt was not acknowledged/);
+  // The close must reject the pending interrupt at once (not via the 3 s timeout).
+  assert.match(
+    r.stderr,
+    /turn\/interrupt was not acknowledged \(turn\/interrupt: connection closed\)/,
+  );
+  assert.ok(Date.now() - t0 < 1500, "must not wait for the interrupt timeout");
 });
 
 test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
@@ -870,9 +879,12 @@ test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
     child.stdin.write("long task");
     child.stdin.end();
   });
+  const t0 = Date.now();
   const r = await result;
   server.close();
   assert.equal(r.code, 130, r.stderr);
+  assert.doesNotMatch(r.stderr, /not acknowledged/);
+  assert.ok(Date.now() - t0 < 1500, "a plain turn must not wait for a review child");
   const interrupt = findRequest(recorded, "turn/interrupt");
   assert.deepEqual(interrupt.params, { threadId: "thread-1", turnId: "turn-1" });
 });
@@ -912,9 +924,12 @@ test("SIGTERM racing the turn/start response still interrupts the turn", async (
     child.stdin.write("long task");
     child.stdin.end();
   });
+  const t0 = Date.now();
   const r = await result;
   server.close();
   assert.equal(r.code, 130, r.stderr);
+  assert.doesNotMatch(r.stderr, /not acknowledged/);
+  assert.ok(Date.now() - t0 < 1500, "must proceed as soon as the start response arrives");
   const interrupt = findRequest(recorded, "turn/interrupt");
   assert.deepEqual(interrupt.params, { threadId: "thread-1", turnId: "turn-1" });
 });
@@ -1177,6 +1192,7 @@ test("a 401 before the review child announces itself still waits for and interru
   const r = await runDriver(["--cwd", "/tmp", "--review", "uncommitted"], { port: server.port });
   server.close();
   assert.equal(r.code, 1);
+  assert.match(r.stderr, /401 Unauthorized/);
   assert.deepEqual(
     recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
     ["child-turn", "turn-1"],
@@ -1213,9 +1229,11 @@ test("SIGTERM during preflight stops the run before any thread or turn is create
     child.stdin.write("x");
     child.stdin.end();
   });
+  const t0 = Date.now();
   const r = await result;
   server.close();
   assert.equal(r.code, 130, r.stderr);
+  assert.ok(Date.now() - t0 < 1500, "preflight must be cut short, not waited out");
   assert.match(r.stderr, /nothing to interrupt/);
   assert.equal(findRequest(recorded, "thread/start"), undefined, "must not go on to start");
   assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
@@ -1370,4 +1388,175 @@ test("server->client requests get schema-valid denials (fail closed)", async () 
   assert.deepEqual(denials[901], { result: { decision: "decline" } });
   assert.deepEqual(denials[902], { result: { decision: "abort" } });
   assert.equal(denials[903].error.code, -32000);
+});
+
+// --- Cells of the state x trigger table that only a timing assertion can pin -------------
+
+const reviewAbortScenario = async ({ onTurnStart }) => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => onTurnStart(send, () => child.kill("SIGTERM")),
+    }),
+  );
+  const result = new Promise((resolve) => {
+    child = spawnDriver([
+      "--session",
+      makeSession(server.port),
+      "--cwd",
+      "/tmp",
+      "--review",
+      "uncommitted",
+    ], {});
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.end();
+  });
+  const t0 = Date.now();
+  const r = await result;
+  server.close();
+  return {
+    ...r,
+    elapsed: Date.now() - t0,
+    interrupts: recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
+  };
+};
+
+test("review with no child ever announced: the child wait is the short bound, then our turn is interrupted", async () => {
+  const r = await reviewAbortScenario({ onTurnStart: (_send, kill) => setTimeout(kill, 100) });
+  assert.equal(r.code, 130, r.stderr);
+  assert.deepEqual(r.interrupts, ["turn-1"]);
+  assert.ok(r.elapsed >= 3000 && r.elapsed < 6000, `child bound is 3 s, took ${r.elapsed}ms`);
+});
+
+test("review whose turn completes before a child appears: the child wait ends with the turn", async () => {
+  const r = await reviewAbortScenario({
+    onTurnStart: (send, kill) => {
+      setTimeout(kill, 100);
+      setTimeout(
+        () =>
+          send({
+            jsonrpc: "2.0",
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: { id: "turn-1", status: "completed", items: [] },
+            },
+          }),
+        200,
+      );
+    },
+  });
+  assert.equal(r.code, 130, r.stderr);
+  assert.deepEqual(r.interrupts, ["turn-1"]);
+  assert.ok(r.elapsed < 1500, `turnDone must cut the child wait, took ${r.elapsed}ms`);
+});
+
+test("turn/interrupt that is never answered times out as an exception, reported, exit code kept", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer((msg, send) => {
+    if (msg.method) recorded.push(msg);
+    if (msg.id === undefined) return;
+    if (msg.method === "turn/interrupt") return; // swallowed, connection stays up
+    appServerBehaviour(recorded, {
+      onTurnStart: () => setTimeout(() => child.kill("SIGTERM"), 100),
+    })(msg, send);
+  });
+  const result = new Promise((resolve) => {
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.write("x");
+    child.stdin.end();
+  });
+  const t0 = Date.now();
+  const r = await result;
+  server.close();
+  const elapsed = Date.now() - t0;
+  assert.equal(r.code, 130, r.stderr);
+  assert.match(r.stderr, /not acknowledged \(turn\/interrupt: no response after 3000ms\)/);
+  assert.ok(elapsed >= 3000 && elapsed < 6000, `took ${elapsed}ms`);
+});
+
+test("every control-plane request is bounded, not just initialize", async () => {
+  for (const stalled of ["thread/start", "turn/start"]) {
+    const recorded = [];
+    const server = await startMockServer((msg, send) => {
+      if (msg.method) recorded.push(msg);
+      if (msg.id === undefined || msg.method === stalled) return;
+      appServerBehaviour(recorded)(msg, send);
+    });
+    const t0 = Date.now();
+    const r = await runDriver(["--cwd", "/tmp"], {
+      port: server.port,
+      stdin: "x",
+      env: { CODEX_BRIDGE_CONTROL_TIMEOUT_MS: "500" },
+    });
+    server.close();
+    assert.equal(r.code, 1, stalled);
+    assert.ok(r.stderr.includes(`${stalled}: no response after 500ms`), `${stalled}: ${r.stderr}`);
+    assert.ok(Date.now() - t0 < 3000, `${stalled}: took too long`);
+  }
+});
+
+/** A TCP listener that accepts connections but never completes the WebSocket upgrade. */
+function silentTcpServer() {
+  const sockets = new Set();
+  const { promise: connected, resolve: onConnected } = Promise.withResolvers();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+    onConnected();
+  });
+  return new Promise((resolve) =>
+    server.listen(0, "127.0.0.1", () =>
+      resolve({
+        port: server.address().port,
+        connected,
+        close: () => {
+          for (const s of sockets) s.destroy();
+          server.close();
+        },
+      }))
+  );
+}
+
+test("a handshake that never completes is bounded by the control timeout", async () => {
+  const server = await silentTcpServer();
+  const t0 = Date.now();
+  const r = await runDriver(["--cwd", "/tmp"], {
+    port: server.port,
+    stdin: "x",
+    env: { CODEX_BRIDGE_CONTROL_TIMEOUT_MS: "500" },
+  });
+  server.close();
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /no WebSocket handshake/);
+  assert.ok(Date.now() - t0 < 3000);
+});
+
+test("SIGTERM during the handshake exits promptly with nothing to interrupt", async () => {
+  const server = await silentTcpServer();
+  let child;
+  const result = new Promise((resolve) => {
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.write("x");
+    child.stdin.end();
+    // Signal only once the driver has connected: by then its handlers are installed on every
+    // runtime (deno starts slower than a fixed delay would assume).
+    server.connected.then(() => setTimeout(() => child.kill("SIGTERM"), 50));
+  });
+  const t0 = Date.now();
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
+  assert.match(r.stderr, /nothing to interrupt/);
+  assert.ok(Date.now() - t0 < 1500);
 });
