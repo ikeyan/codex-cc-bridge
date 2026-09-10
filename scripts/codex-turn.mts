@@ -791,11 +791,14 @@ async function interruptOwned(): Promise<void> {
   );
   const ours = turn.value;
   if (ours === undefined) throw new Error("no turn was started, so there is nothing to interrupt");
-  const kid = reviewMode === undefined ? undefined : await Promise.race([
+  // A child already announced (a review's, or a subagent a plain turn spawned) is always a
+  // target. Only a review is *waited* for: its child is coming by grammar; a plain turn's
+  // may never exist.
+  const kid = child.value ?? (reviewMode === undefined ? undefined : await Promise.race([
     child.promise,
     turnDone.promise.then(() => undefined),
     sleep(3000, undefined, { ref: false }),
-  ]);
+  ]));
   const targets = [...(kid !== undefined ? [kid] : []), ours.turnId];
   await withTimeout(
     Promise.all(

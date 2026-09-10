@@ -156,7 +156,8 @@ test("ready: server that exits after its banner is reported, not polled to the d
   );
   const dir = (await run(["init"], { TMPDIR: scratch() })).stdout.trim();
   const out = join(scratch(), "task.output");
-  writeFileSync(out, `listening on: ws://127.0.0.1:${port}\n`);
+  // Both lines are present from the first poll on: the helper must still say "after".
+  writeFileSync(out, `listening on: ws://127.0.0.1:${port}\nfatal: boom\n\n[exited with code 1]\n`);
   setTimeout(
     () =>
       writeFileSync(

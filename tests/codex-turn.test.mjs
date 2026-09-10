@@ -770,6 +770,40 @@ test("connection dropping while the interrupt is pending is reported, with the a
   assert.ok(Date.now() - t0 < 1500, "must not wait for the interrupt timeout");
 });
 
+test("a plain turn's already-announced subagent turn is interrupted too, without any wait", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        send({
+          jsonrpc: "2.0",
+          method: "turn/started",
+          params: { threadId: "thread-1", turn: { id: "sub-turn", status: "inProgress" } },
+        });
+        setTimeout(() => child.kill("SIGTERM"), 150);
+      },
+    }),
+  );
+  const result = new Promise((resolve) => {
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.write("x");
+    child.stdin.end();
+  });
+  const t0 = Date.now();
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
+  assert.deepEqual(
+    recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
+    ["sub-turn", "turn-1"],
+  );
+  assert.ok(Date.now() - t0 < 1500, "known child: no waiting");
+});
+
 test("SIGTERM during a turn sends turn/interrupt before exiting", async () => {
   const recorded = [];
   let child;
