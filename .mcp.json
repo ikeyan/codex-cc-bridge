@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "lsmcp": {
-      "command": "npx",
-      "args": ["-y", "@mizchi/lsmcp", "-p", "tsgo"]
+      "command": "node",
+      "args": ["${HOME}/hobby/lsmcp/dist/lsmcp.js", "-p", "tsgo"]
     }
   }
 }
