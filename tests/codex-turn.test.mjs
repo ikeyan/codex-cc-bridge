@@ -770,6 +770,84 @@ test("connection dropping while the interrupt is pending is reported, with the a
   assert.ok(Date.now() - t0 < 1500, "must not wait for the interrupt timeout");
 });
 
+test("every announced subagent turn of a plain turn is interrupted, then ours", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        for (const id of ["sub-1", "sub-2", "sub-3"]) {
+          send({
+            jsonrpc: "2.0",
+            method: "turn/started",
+            params: { threadId: "thread-1", turn: { id, status: "inProgress" } },
+          });
+        }
+        setTimeout(() => child.kill("SIGTERM"), 150);
+      },
+    }),
+  );
+  const result = new Promise((resolve) => {
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.write("x");
+    child.stdin.end();
+  });
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
+  assert.deepEqual(
+    recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
+    ["sub-1", "sub-2", "sub-3", "turn-1"],
+  );
+});
+
+test("notifications that do not have their method's shape are ignored, not crashed on", async () => {
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      onTurnStart: (send) => {
+        // turn/completed without a turn id, item/completed without an item, error with a
+        // string where an object is expected: none of these may be taken as ours.
+        send({
+          jsonrpc: "2.0",
+          method: "turn/completed",
+          params: { threadId: "thread-1", turn: {} },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "item/completed",
+          params: { threadId: "thread-1", turnId: "turn-1" },
+        });
+        send({ jsonrpc: "2.0", method: "error", params: { threadId: "thread-1", error: "boom" } });
+        send({ jsonrpc: "2.0", method: "turn/started", params: { threadId: "thread-1" } });
+        send({
+          jsonrpc: "2.0",
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: { type: "agentMessage", text: "FINE", phase: "final_answer" },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "turn/completed",
+          params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
+        });
+      },
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  const out = JSON.parse(r.stdout);
+  assert.equal(out.finalMessage, "FINE");
+  assert.deepEqual(out.childTurnIds, []);
+});
+
 test("a plain turn's already-announced subagent turn is interrupted too, without any wait", async () => {
   const recorded = [];
   let child;
@@ -1257,7 +1335,8 @@ test("a start response without a turn id fails instead of hanging", async () => 
   const r = await runDriver(["--cwd", "/tmp"], { port: server.port, stdin: "x" });
   server.close();
   assert.equal(r.code, 1);
-  assert.match(r.stderr, /no turn id/);
+  // The response is checked against its shape at the boundary; no turn id = not a response.
+  assert.match(r.stderr, /turn\/start: response has an unexpected shape/);
 });
 
 test("stalled control-plane RPCs time out instead of hanging", async () => {

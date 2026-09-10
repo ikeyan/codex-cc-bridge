@@ -67,6 +67,7 @@ const steps: Step[] = [
       "scripts/codex-bridge.mts",
       "scripts/check.mts",
       "scripts/wiki-symbols.mts",
+      "scripts/guard.mts",
     ],
   },
   {

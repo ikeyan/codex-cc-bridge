@@ -32,80 +32,88 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
+import {
+  isNumber,
+  isObjectOf,
+  isOneOf,
+  isReadonlyArrayOf,
+  isString,
+  isUndefinedableOf,
+} from "./guard.mts";
 
 const PINNED_THREAD_SANDBOX = "danger-full-access";
 const PINNED_TURN_SANDBOX_POLICY = Object.freeze({ type: "dangerFullAccess" });
 const PINNED_APPROVAL_POLICY = "never";
 const PROBE_TIMEOUT_MS = 15_000;
 
-// --- Protocol types (the small subset of the codex app-server v2 API we use;
-// authoritative schemas: `codex app-server generate-json-schema`) -----------
+// --- Protocol guards (the small subset of the codex app-server v2 API we use;
+// authoritative schemas: `codex app-server generate-json-schema`). Every frame from the
+// wire and every response is checked against these at the boundary, so the logic below
+// only ever sees the shapes it asked for (no `?.`, no casts). -----------------------------
 
-interface JsonRpcError {
-  code: number;
-  message: string;
-  data?: unknown;
-}
+type Guarded<G> = G extends (value: unknown) => value is infer T ? T : never;
+/** Property may hold anything (or be absent); we carry it through without looking. */
+const anyValue = (_: unknown): boolean => true;
+const isUnknown = (_: unknown): _ is unknown => true;
+const optString = isUndefinedableOf(isString);
+const optNumber = isUndefinedableOf(isNumber);
+/** The message of anything thrown. Checks for the property rather than for Error-ness:
+ * a DOMException is not an Error on every runtime (bun), but it carries a message. */
+const hasMessage = isObjectOf({ message: isString });
+const errorMessage = (e: unknown): string => hasMessage(e) ? e.message : String(e);
 
-/** Incoming frame: response, notification, or server->client request. */
-interface IncomingMessage {
-  id?: number;
-  method?: string;
-  params?: NotificationParams;
-  result?: unknown;
-  error?: JsonRpcError;
-}
-
-interface AgentItem {
-  type?: string;
-  phase?: string;
-  text?: string;
-  command?: string;
-  status?: string;
-  exitCode?: number;
-}
-
-interface Turn {
-  id?: string;
-  status?: string;
-  error?: unknown;
-  items?: AgentItem[];
-}
-
-interface NotificationParams {
-  threadId?: string;
-  turnId?: string;
-  item?: AgentItem;
-  tokenUsage?: unknown;
-  turn?: Turn;
-}
-
-interface TurnCompletedParams {
-  threadId?: string;
-  turn?: Turn;
-}
-
-interface ThreadResponse {
-  thread?: { id?: string };
+const isJsonRpcError = isObjectOf({ code: isNumber, message: isString, data: anyValue });
+const isAgentItem = isObjectOf({
+  type: optString,
+  phase: optString,
+  text: optString,
+  command: optString,
+  status: optString,
+  exitCode: optNumber,
+});
+const isTurn = isObjectOf({
+  id: isString,
+  status: optString,
+  error: anyValue,
+  items: isUndefinedableOf(isReadonlyArrayOf(isAgentItem)),
+});
+/** Any frame: response (id + result/error), notification (method, no id), or
+ * server->client request (id + method). Params are checked per method. */
+const isIncomingMessage = isObjectOf({
+  id: optNumber,
+  method: optString,
+  params: anyValue,
+  result: anyValue,
+  error: isUndefinedableOf(isJsonRpcError),
+});
+const isItemCompleted = isObjectOf({ threadId: optString, turnId: optString, item: isAgentItem });
+/** turn/started and turn/completed. */
+const isTurnEvent = isObjectOf({ threadId: optString, turn: isTurn });
+type TurnEvent = Guarded<typeof isTurnEvent>;
+const isErrorEvent = isObjectOf({
+  threadId: optString,
+  turnId: optString,
+  error: isObjectOf({
+    message: optString,
+    codexErrorInfo: isUndefinedableOf(isObjectOf({
+      responseStreamDisconnected: isUndefinedableOf(isObjectOf({ httpStatusCode: optNumber })),
+    })),
+  }),
+});
+const isTokenUsageEvent = isObjectOf({ threadId: optString, tokenUsage: anyValue });
+const isThreadResponse = isObjectOf({
+  thread: isObjectOf({ id: isString }),
   /** Model the server actually resolved for the thread (echoes `model` when we send one). */
-  model?: string;
-  reasoningEffort?: string | null;
-}
-
-interface TurnStartResponse {
-  turn?: Turn;
-}
-
-interface ReviewStartResponse {
-  reviewThreadId?: string;
-  turn?: Turn;
-}
-
-interface CommandExecResponse {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
+  model: optString,
+  reasoningEffort: isUndefinedableOf((v: unknown): v is string | null => v === null || isString(v)),
+});
+const isTurnStartResponse = isObjectOf({ turn: isTurn });
+const isReviewStartResponse = isObjectOf({ reviewThreadId: optString, turn: isTurn });
+const isCommandExecResponse = isObjectOf({
+  exitCode: isNumber,
+  stdout: isString,
+  stderr: isString,
+});
 
 // --- CLI --------------------------------------------------------------------
 
@@ -145,7 +153,7 @@ function parseCli(args: string[]) {
       allowPositionals: false,
     }).values;
   } catch (e) {
-    usage((e as Error).message);
+    usage(errorMessage(e));
   }
 }
 
@@ -166,7 +174,7 @@ function readSessionFile(name: string, missingHint: string): string {
   try {
     return fs.readFileSync(path.join(sessionDir!, name), "utf8").trim();
   } catch (e) {
-    usage(`session ${sessionDir}: cannot read ${name} (${(e as Error).message}). ${missingHint}`);
+    usage(`session ${sessionDir}: cannot read ${name} (${errorMessage(e)}). ${missingHint}`);
   }
 }
 const token = readSessionFile("token", "Is this the dir printed by `codex-bridge.mts init`?");
@@ -189,11 +197,11 @@ const url = `ws://127.0.0.1:${port}`;
 // may legally contain `$(...)` or a single quote (measured), so no quoting discipline in
 // the agent's command line is safe; a file written by the Write tool, or stdin, is.
 const REVIEW_MODES = ["uncommitted", "base", "commit", "custom"] as const;
-type ReviewMode = typeof REVIEW_MODES[number];
-const reviewMode = opts.review as ReviewMode | undefined;
-if (reviewMode !== undefined && !REVIEW_MODES.includes(reviewMode)) {
-  usage(`--review must be one of ${REVIEW_MODES.join("|")}, got ${JSON.stringify(reviewMode)}`);
-}
+const reviewMode = opts.review === undefined
+  ? undefined
+  : isOneOf(opts.review, REVIEW_MODES)
+  ? opts.review
+  : usage(`--review must be one of ${REVIEW_MODES.join("|")}, got ${JSON.stringify(opts.review)}`);
 // review/start itself carries only {threadId, target, delivery}, so an outputSchema and
 // a per-turn effort have nowhere to go (and stdin is the target, not a prompt).
 // `model` is different: it is a thread-level setting, and the review runs on the thread
@@ -224,7 +232,7 @@ function readTargetLine(file: string, what: string): string {
   try {
     text = fs.readFileSync(file, "utf8");
   } catch (e) {
-    usage(`--target-file ${file}: ${(e as Error).message}`);
+    usage(`--target-file ${file}: ${errorMessage(e)}`);
   }
   const line = text.replace(/\r?\n$/, "");
   if (!line || line.includes("\n")) {
@@ -255,7 +263,7 @@ function readSchema(file: string): unknown {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch (e) {
-    usage(`--schema ${file}: ${(e as Error).message}`);
+    usage(`--schema ${file}: ${errorMessage(e)}`);
   }
 }
 const outputSchema: unknown = opts.schema ? readSchema(opts.schema) : undefined;
@@ -331,9 +339,10 @@ const progress = (event: string, detail: Record<string, unknown>): void => {
 const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } });
 let nextId = 1;
 interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
   method: string;
+  /** Checks the result against the guard the caller gave, resolving or rejecting. */
+  settle: (result: unknown) => void;
+  reject: (error: Error) => void;
 }
 const pending = new Map<number, PendingRequest>();
 
@@ -348,10 +357,24 @@ function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 }
 
 const send = (msg: object): void => ws.send(JSON.stringify(msg));
-function request<T>(method: string, params: unknown): Promise<T> {
+/** A request whose response must satisfy `guard` (else it rejects: the shape is the contract). */
+function request<T>(
+  method: string,
+  params: unknown,
+  guard: (value: unknown) => value is T,
+): Promise<T> {
   const id = nextId++;
   const { promise, resolve, reject } = Promise.withResolvers<T>();
-  pending.set(id, { resolve: resolve as (value: unknown) => void, reject, method });
+  pending.set(id, {
+    method,
+    reject,
+    settle: (result) => {
+      if (guard(result)) resolve(result);
+      else {reject(
+          new Error(`${method}: response has an unexpected shape: ${JSON.stringify(result)}`),
+        );}
+    },
+  });
   send({ jsonrpc: "2.0", id, method, params });
   return promise;
 }
@@ -359,8 +382,9 @@ function request<T>(method: string, params: unknown): Promise<T> {
 const boundedRequest = <T,>(
   method: string,
   params: unknown,
+  guard: (value: unknown) => value is T,
   timeoutMs = CONTROL_TIMEOUT_MS,
-): Promise<T> => withTimeout(request<T>(method, params), timeoutMs, method);
+): Promise<T> => withTimeout(request(method, params, guard), timeoutMs, method);
 /** boundedRequest() for preflight steps: also gives up as soon as the run's outcome is
  * decided (an abort during preflight must not go on to create a thread and a turn just to
  * interrupt them). The start request itself is NOT cut short: once sent, the server may have
@@ -368,8 +392,9 @@ const boundedRequest = <T,>(
 const controlRequest = <T,>(
   method: string,
   params: unknown,
+  guard: (value: unknown) => value is T,
   timeoutMs = CONTROL_TIMEOUT_MS,
-): Promise<T> => untilDecided(boundedRequest<T>(method, params, timeoutMs));
+): Promise<T> => untilDecided(boundedRequest(method, params, guard, timeoutMs));
 
 // --- Lifecycle: values that are decided exactly once -------------------------
 // All lifecycle state is a value that is set at most once and can be awaited: a promise.
@@ -402,7 +427,7 @@ class Once<T> {
 
 /** How this driver run ends. Set from wherever the ending is decided; acted on in one place. */
 type Outcome =
-  | { kind: "completed"; params: TurnCompletedParams }
+  | { kind: "completed"; params: TurnEvent }
   /** Interrupt whatever we own on the server (bounded), then exit with `code`. */
   | { kind: "aborted"; reason: string; code: number }
   /** Nothing to interrupt (or no connection to do it over): report and exit 1. */
@@ -421,15 +446,18 @@ function untilDecided<T>(p: Promise<T>): Promise<T> {
 }
 
 /** What we own on the server, as it becomes known. `turn` is our turn and the thread it
- * runs on (normally ours; a review the server moved elsewhere is still ours to interrupt);
- * `child` the subagent turn a review runs in (measured: interrupting only the parent does
- * not stop it), which announces itself as a turn/started on our thread. `runSettled` is
- * run() having ended, by success or throw: after it, `turn` is either set or never will be. */
+ * runs on (normally ours; a review the server moved elsewhere is still ours to interrupt).
+ * `children` are the subagent turns announced on our thread (turn/started with another
+ * id): the one a review runs in, or any a plain turn spawns. Interrupting only the parent
+ * does not stop them (measured), so all of them are interrupt targets; `anyChild` lets a
+ * review wait for its first. `runSettled` is run() having ended, by success or throw: after
+ * it, `turn` is either set or never will be. */
 let threadId: string | undefined = opts.thread;
 const runSettled = new Once<true>();
 const turn = new Once<{ threadId: string; turnId: string }>();
-const child = new Once<string>();
-const turnDone = new Once<TurnCompletedParams>();
+const children = new Set<string>();
+const anyChild = new Once<true>();
+const turnDone = new Once<TurnEvent>();
 
 let finalAnswer: string | null = null;
 let lastAgentMessage: string | null = null;
@@ -473,15 +501,15 @@ const DENIALS: Record<string, object> = {
   applyPatchApproval: { decision: "abort" },
 };
 
-function handleServerRequest(msg: IncomingMessage): void {
-  progress("server-request-denied", { method: msg.method });
-  const denial = DENIALS[msg.method!];
+function handleServerRequest(id: number, method: string): void {
+  progress("server-request-denied", { method });
+  const denial = DENIALS[method];
   if (denial) {
-    send({ jsonrpc: "2.0", id: msg.id, result: denial });
+    send({ jsonrpc: "2.0", id, result: denial });
   } else {
     send({
       jsonrpc: "2.0",
-      id: msg.id,
+      id,
       error: { code: -32000, message: "denied by codex-cc-bridge (fail closed)" },
     });
   }
@@ -490,16 +518,17 @@ function handleServerRequest(msg: IncomingMessage): void {
 // Turn-scoped events can arrive in the same TCP chunk as the turn/start
 // response, i.e. before the awaited response assigns our turn id. Buffer them
 // until our turn is identified, then replay through the same handler.
-const earlyEvents: { method: string; params: NotificationParams }[] = [];
-function handleTurnEvent(method: string, params: NotificationParams): void {
-  const owned = turn.value!;
+const earlyEvents: { method: string; params: unknown }[] = [];
+type Owned = { threadId: string; turnId: string };
+function handleTurnEvent(owned: Owned, method: string, params: unknown): void {
   // Not on the thread we own (child threads spawned by subagents, unrelated threads on a
-  // shared server): not ours.
-  if (params.threadId !== undefined && params.threadId !== owned.threadId) return;
-  const ours = owned.turnId;
+  // shared server): not ours. Params that do not have the method's shape are not ours either.
+  const onOurThread = (p: { threadId?: string }): boolean =>
+    p.threadId === undefined || p.threadId === owned.threadId;
   if (method === "item/completed") {
-    if (params.turnId !== undefined && params.turnId !== ours) return;
-    const item = params.item ?? {};
+    if (!isItemCompleted(params) || !onOurThread(params)) return;
+    if (params.turnId !== undefined && params.turnId !== owned.turnId) return;
+    const item = params.item;
     if (item.type === "agentMessage") {
       if (item.phase === "final_answer") finalAnswer = item.text ?? "";
       else lastAgentMessage = item.text ?? "";
@@ -512,28 +541,30 @@ function handleTurnEvent(method: string, params: NotificationParams): void {
   } else if (method === "turn/completed") {
     // Only accept the completion of the turn we started; anything else
     // (concurrent drivers, child turns) is not ours.
-    if (params.turn?.id !== ours) return;
+    if (!isTurnEvent(params) || !onOurThread(params)) return;
+    if (params.turn.id !== owned.turnId) return;
     turnDone.set(params);
   } else if (method === "turn/started") {
-    // A turn on our thread that is not ours: the subagent child a review runs in.
-    const id = params.turn?.id;
-    if (id !== undefined && id !== ours) child.set(id);
+    // A turn on our thread that is not ours: a subagent turn (the one a review runs in, or
+    // one a plain turn spawned). Kept so interrupts reach it and the result can name it.
+    if (!isTurnEvent(params) || !onOurThread(params)) return;
+    if (params.turn.id !== owned.turnId) {
+      children.add(params.turn.id);
+      anyChild.set(true);
+    }
   } else if (method === "error") {
-    // Ours if it names our turn or the review child, or names no turn (thread-level). A
-    // review's child may not be identified yet, so accept unknown turn ids in that window.
+    if (!isErrorEvent(params) || !onOurThread(params)) return;
+    // Ours if it names our turn or a child, or names no turn (thread-level). A review's
+    // child may not be identified yet, so accept unknown turn ids in that window.
     const t = params.turnId;
-    const mine = t === undefined || t === ours || t === child.value ||
-      (reviewMode !== undefined && child.value === undefined);
+    const mine = t === undefined || t === owned.turnId || children.has(t) ||
+      (reviewMode !== undefined && children.size === 0);
     if (!mine) return;
     progress("error", { detail: params });
     // Codex cannot authenticate to OpenAI (auth.json unreadable under a read-restricted
     // sandbox, or logged out): the server retries forever and the turn never completes
     // (measured), so waiting is pointless.
-    const status = (params as {
-      error?: { codexErrorInfo?: { responseStreamDisconnected?: { httpStatusCode?: number } } };
-    })
-      .error?.codexErrorInfo?.responseStreamDisconnected?.httpStatusCode;
-    if (status === 401) {
+    if (params.error.codexErrorInfo?.responseStreamDisconnected?.httpStatusCode === 401) {
       abort(
         "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
           "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
@@ -543,52 +574,59 @@ function handleTurnEvent(method: string, params: NotificationParams): void {
     }
   }
 }
-function turnIdentified(thread: string, turnId: string): void {
-  turn.set({ threadId: thread, turnId });
-  for (const e of earlyEvents) handleTurnEvent(e.method, e.params);
+function turnIdentified(owned: Owned): void {
+  turn.set(owned);
+  for (const e of earlyEvents) handleTurnEvent(owned, e.method, e.params);
   earlyEvents.length = 0;
 }
 
 ws.onmessage = (raw: MessageEvent) => {
-  let msg: IncomingMessage;
+  let frame: unknown;
   try {
-    msg = JSON.parse(String(raw.data)) as IncomingMessage;
+    frame = JSON.parse(String(raw.data));
   } catch {
     // A throw here would be an uncaught exception: exit without interrupting the turn.
     abort("app-server sent a frame that is not JSON; giving up on this connection", 1);
     return;
   }
+  if (!isIncomingMessage(frame)) {
+    progress("malformed-frame", { frame });
+    return;
+  }
+  const msg = frame;
   if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
     const p = pending.get(msg.id);
     if (!p) return;
     pending.delete(msg.id);
     if (msg.error) p.reject(new Error(`${p.method}: ${JSON.stringify(msg.error)}`));
-    else p.resolve(msg.result);
+    else p.settle(msg.result);
     return;
   }
-  if (!msg.method) return;
+  if (msg.method === undefined) return;
   if (msg.id !== undefined) {
-    handleServerRequest(msg);
+    handleServerRequest(msg.id, msg.method);
     return;
   }
-  const params: NotificationParams = msg.params ?? {};
   switch (msg.method) {
     case "item/completed":
     case "turn/completed":
     case "turn/started":
-    case "error":
+    case "error": {
       // Turn-scoped events are filtered by thread and turn inside handleTurnEvent, which
       // needs `turn` (our turn and the thread it lives on). Until that is known, buffer them
       // unfiltered: the thread a review's child reports may only be known from the
       // review/start response, which the child's turn/started can precede on the wire.
-      if (turn.value === undefined) earlyEvents.push({ method: msg.method, params });
-      else handleTurnEvent(msg.method, params);
+      const owned = turn.value;
+      if (owned === undefined) earlyEvents.push({ method: msg.method, params: msg.params });
+      else handleTurnEvent(owned, msg.method, msg.params);
       break;
+    }
     case "thread/tokenUsage/updated":
       if (
-        threadId !== undefined && (params.threadId === undefined || params.threadId === threadId)
+        isTokenUsageEvent(msg.params) && threadId !== undefined &&
+        (msg.params.threadId === undefined || msg.params.threadId === threadId)
       ) {
-        usageInfo = params.tokenUsage ?? params ?? null;
+        usageInfo = msg.params.tokenUsage ?? msg.params;
       }
       break;
     default:
@@ -603,7 +641,7 @@ process.on("SIGTERM", () => abort("SIGTERM: turn interrupted", 130));
 // Throwing anywhere here ends the run as "failed" unless the outcome was already decided
 // (an abort in flight), in which case the throw is simply late.
 
-async function run(): Promise<TurnCompletedParams> {
+async function run(): Promise<TurnEvent> {
   await untilDecided(once(ws, "open", { signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) }))
     .catch(() => fail(`no WebSocket handshake from ${url} within ${CONTROL_TIMEOUT_MS}ms`));
 
@@ -618,7 +656,7 @@ async function run(): Promise<TurnCompletedParams> {
         "item/commandExecution/outputDelta",
       ],
     },
-  }).catch((e: Error) => fail(String(e.message ?? e)));
+  }, isUnknown).catch((e: Error) => fail(e.message));
   send({ jsonrpc: "2.0", method: "initialized", params: {} });
 
   // --- Containment preflight -------------------------------------------------
@@ -635,7 +673,7 @@ async function run(): Promise<TurnCompletedParams> {
       probeWrite("/tmp", "tmp") +
       probeWrite(".", "cwdw") +
       `echo "$home $tmp $cwdw"`;
-    const probe = await controlRequest<CommandExecResponse>(
+    const probe = await controlRequest(
       "command/exec",
       {
         command: ["/bin/sh", "-c", script],
@@ -645,18 +683,15 @@ async function run(): Promise<TurnCompletedParams> {
         sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
         timeoutMs: PROBE_TIMEOUT_MS - 5000,
       },
+      isCommandExecResponse,
       PROBE_TIMEOUT_MS,
-    ).catch((e: Error) =>
-      fail(`containment probe failed (refusing to run a turn): ${e.message ?? e}`)
-    );
+    ).catch((e: Error) => fail(`containment probe failed (refusing to run a turn): ${e.message}`));
     if (probe.exitCode !== 0) {
       fail(
-        `containment probe did not run cleanly (exit ${probe.exitCode}, stderr: ${
-          String(probe.stderr ?? "").trim()
-        }). Refusing to run a turn.`,
+        `containment probe did not run cleanly (exit ${probe.exitCode}, stderr: ${probe.stderr.trim()}). Refusing to run a turn.`,
       );
     }
-    const fields = String(probe.stdout ?? "").trim().split(/\s+/);
+    const fields = probe.stdout.trim().split(/\s+/);
     // Three known words or nothing: anything else is a broken probe, not a verdict.
     if (fields.length !== 3 || !fields.every((f) => f === "BLOCKED" || f === "WRITABLE")) {
       fail(
@@ -684,66 +719,64 @@ async function run(): Promise<TurnCompletedParams> {
     progress("containment", { home: "BLOCKED", tmp: "BLOCKED", cwd: "WRITABLE" });
   }
   // ---------------------------------------------------------------------------
-  let resolved: ThreadResponse | undefined;
+  let resolved: Guarded<typeof isThreadResponse>;
   if (threadId) {
-    const r = await controlRequest<ThreadResponse>("thread/resume", {
+    const r = await controlRequest("thread/resume", {
       threadId,
       cwd,
       sandbox: PINNED_THREAD_SANDBOX,
       approvalPolicy: PINNED_APPROVAL_POLICY,
       developerInstructions: DEVELOPER_INSTRUCTIONS,
       ...(opts.model ? { model: opts.model } : {}),
-    }).catch((e: Error) => {
+    }, isThreadResponse).catch((e: Error) => {
       // Another client holds the thread open: measured cause is the ChatGPT app's remote
       // control resuming bridge threads on its own app-server (canon:
       // facts/codex/thread-resume-blocked-by-other-writer-client). Nothing here can
       // release it; say so instead of leaving a bare -32600.
-      if (String(e.message).includes("already has an active writer")) {
+      if (e.message.includes("already has an active writer")) {
         fail(
           `thread ${threadId} is held open by another codex client (typically the ChatGPT app's ` +
             "remote control, which can resume non-ephemeral threads). Close it there, or drop " +
             `--thread and start a new thread.\n(${e.message})`,
         );
       }
-      fail(String(e.message ?? e));
+      fail(e.message);
     });
-    threadId = r.thread?.id ?? threadId;
+    threadId = r.thread.id;
     resolved = r;
   } else {
-    const r = await controlRequest<ThreadResponse>("thread/start", {
+    const r = await controlRequest("thread/start", {
       cwd,
       sandbox: PINNED_THREAD_SANDBOX,
       approvalPolicy: PINNED_APPROVAL_POLICY,
       developerInstructions: DEVELOPER_INSTRUCTIONS,
       ephemeral: false,
       ...(opts.model ? { model: opts.model } : {}),
-    }).catch((e: Error) => fail(String(e.message ?? e)));
-    threadId = r.thread?.id;
+    }, isThreadResponse).catch((e: Error) => fail(e.message));
+    threadId = r.thread.id;
     resolved = r;
   }
-  if (!threadId) fail("app-server returned no thread id");
   // Report what the server resolved, not what we asked for: the only in-band evidence of
   // which model the thread runs. Note the server echoes an unknown name back unchanged --
   // this proves the parameter was accepted, not that the model exists.
   progress("thread", {
     threadId,
-    model: resolved?.model ?? null,
-    effort: resolved?.reasoningEffort ?? null,
+    model: resolved.model ?? null,
+    effort: resolved.reasoningEffort ?? null,
   });
 
   if (reviewTarget) {
-    const r = await boundedRequest<ReviewStartResponse>("review/start", {
+    const r = await boundedRequest("review/start", {
       threadId,
       target: reviewTarget,
       delivery: "inline",
-    }).catch((e: Error) => fail(String(e.message ?? e)));
-    if (!r.turn?.id) fail("app-server returned no turn id for review/start");
+    }, isReviewStartResponse).catch((e: Error) => fail(e.message));
     // With delivery "inline" the review runs on the thread we started, and every event
     // arrives on that threadId (measured; "detached" is rejected for thread/start threads).
     // Events for any other thread are filtered out before the early-event buffer sees them,
     // so a review moved elsewhere could only be waited on forever. The server has already
     // accepted it, though, so record where it went and abort (= interrupt it there).
-    turnIdentified(r.reviewThreadId ?? threadId, r.turn.id);
+    turnIdentified({ threadId: r.reviewThreadId ?? threadId, turnId: r.turn.id });
     if (r.reviewThreadId !== undefined && r.reviewThreadId !== threadId) {
       abort(
         `review/start moved the review to thread ${r.reviewThreadId}; this driver only follows ` +
@@ -762,24 +795,24 @@ async function run(): Promise<TurnCompletedParams> {
     if (outputSchema !== undefined) params.outputSchema = outputSchema;
     if (opts.model) params.model = opts.model;
     if (opts.effort) params.effort = opts.effort;
-    const r = await boundedRequest<TurnStartResponse>("turn/start", params).catch((e: Error) =>
-      fail(String(e.message ?? e))
+    const r = await boundedRequest("turn/start", params, isTurnStartResponse).catch((e: Error) =>
+      fail(e.message)
     );
-    if (!r.turn?.id) fail("app-server returned no turn id for turn/start");
-    turnIdentified(threadId, r.turn.id);
+    turnIdentified({ threadId, turnId: r.turn.id });
   }
   return await turnDone.promise;
 }
 
 // --- Ending -------------------------------------------------------------------
 
-/** Interrupt what we own, child first (interrupting the parent alone does not reach it,
- * measured). Each wait ends when the grammar says the value is decided, not on a guess:
- * `turn` once run() has ended (a decided outcome cuts preflight short, so this is prompt
- * unless a start request is in flight, which gets a short deadline of its own);
- * `child` once it announces itself or our turn
- * is over — plus a short bound, since a child that is coming does so right after the start
- * response. Throws when the interrupt could not be confirmed. */
+/** Interrupt what we own, children first (interrupting the parent alone does not reach
+ * them, measured). Each wait ends when the grammar says the value is decided, not on a
+ * guess: `turn` once run() has ended (a decided outcome cuts preflight short, so this is
+ * prompt unless a start request is in flight, which gets a short deadline of its own); a
+ * review's child once it announces itself or our turn is over — plus a short bound, since
+ * a child that is coming does so right after the start response. A plain turn's children
+ * are not waited for (they may never exist), only used when already known. Throws when the
+ * interrupt could not be confirmed. */
 async function interruptOwned(): Promise<void> {
   // A start request that is still unanswered decides `turn` on its own (30 s) timeout; a
   // cancel must not look stuck for that long, so give the decision a short deadline and
@@ -791,18 +824,19 @@ async function interruptOwned(): Promise<void> {
   );
   const ours = turn.value;
   if (ours === undefined) throw new Error("no turn was started, so there is nothing to interrupt");
-  // A child already announced (a review's, or a subagent a plain turn spawned) is always a
-  // target. Only a review is *waited* for: its child is coming by grammar; a plain turn's
-  // may never exist.
-  const kid = child.value ?? (reviewMode === undefined ? undefined : await Promise.race([
-    child.promise,
-    turnDone.promise.then(() => undefined),
-    sleep(3000, undefined, { ref: false }),
-  ]));
-  const targets = [...(kid !== undefined ? [kid] : []), ours.turnId];
+  if (reviewMode !== undefined && children.size === 0) {
+    await Promise.race([
+      anyChild.promise,
+      turnDone.promise,
+      sleep(3000, undefined, { ref: false }),
+    ]);
+  }
+  const targets = [...children, ours.turnId];
   await withTimeout(
     Promise.all(
-      targets.map((turnId) => request("turn/interrupt", { threadId: ours.threadId, turnId })),
+      targets.map((turnId) =>
+        request("turn/interrupt", { threadId: ours.threadId, turnId }, isUnknown)
+      ),
     ),
     3000,
     "turn/interrupt",
@@ -812,7 +846,7 @@ async function interruptOwned(): Promise<void> {
 run()
   .then(
     (params) => outcome.resolve({ kind: "completed", params }),
-    (e: Error) => outcome.resolve({ kind: "failed", message: String(e?.message ?? e) }),
+    (e: unknown) => outcome.resolve({ kind: "failed", message: errorMessage(e) }),
   )
   .finally(() => runSettled.set(true));
 const result = await outcome.promise;
@@ -824,21 +858,24 @@ switch (result.kind) {
   case "aborted":
     // Reason first, so nothing that happens during the interrupt can swallow it.
     console.error(`codex-turn: ${result.reason}`);
-    await interruptOwned().catch((e: Error) =>
+    await interruptOwned().catch((e: unknown) =>
       console.error(
-        `codex-turn: turn/interrupt was not acknowledged (${e.message}); the server turn may still be running`,
+        `codex-turn: turn/interrupt was not acknowledged (${
+          errorMessage(e)
+        }); the server turn may still be running`,
       )
     );
     process.exit(result.code);
     break;
   case "completed": {
-    const t: Turn = result.params.turn ?? {};
+    const t = result.params.turn;
     let finalMessage: string | null = finalAnswer ?? lastAgentMessage;
     if (finalMessage === null) {
       const items = (t.items ?? []).filter((i) => i.type === "agentMessage");
       const final = items.find((i) => i.phase === "final_answer") ?? items[items.length - 1];
       if (final) finalMessage = final.text ?? "";
     }
+    const [firstChild] = children;
     console.log(
       JSON.stringify(
         {
@@ -846,9 +883,10 @@ switch (result.kind) {
           // The turn id lets `codex-bridge.mts turn-context <thread> <turn>` pick this turn's
           // server-side record out of a resumed thread's many.
           turnId: turn.value?.turnId,
-          // The subagent child turn, if one announced itself: for a review that is where the
-          // turn_context lives, so it is the id to give `turn-context` (null otherwise).
-          reviewTurnId: child.value ?? null,
+          // The first subagent turn announced on our thread: for a review that is where the
+          // turn_context lives, so it is the id to give `turn-context` (null if none).
+          reviewTurnId: firstChild ?? null,
+          childTurnIds: [...children],
           turnStatus: t.status ?? null,
           turnError: t.error ?? null,
           finalMessage,

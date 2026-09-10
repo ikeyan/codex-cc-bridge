@@ -47,7 +47,7 @@ thread も turn も作らず、モデルにも渡らず、トークンも消費�
 違えば fail-closed で落とす — 別 thread の通知は
 [[architecture/turn-event-demultiplexing|thread フィルタ]]で捨てられるので、追い掛けても永久に待つだけになる。
 内部ではレビュー本体は subagent の子 thread で走り、親 threadId で別 turnId の `turn/started` が 1 回届く。
-`turn/completed` を turnId で絞る 3 段目のフィルタが効くので driver には影響しないが、実効設定の記録は
+`turn/completed` を turnId で絞る 2 段目のフィルタが効くので driver には影響しないが、実効設定の記録は
 子 rollout にある ([[domain/verifying-the-effective-model]])。
 
 **どの調整項目がレビューに効くかは、それが thread の設定か turn の設定かで決まる。**

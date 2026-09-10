@@ -92,10 +92,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/codex-turn.mts" --session <DIR> < /path/to/p
 
 (prompt を渡す口は stdin だけ。`--prompt` のようなフラグは無い。)
 
-- 結果: stdout に JSON `{ threadId, turnId, reviewTurnId, turnStatus, turnError, finalMessage, tokenUsage }`
-  (`reviewTurnId` は自 thread に別 turnId で `turn/started` が届いたとき、つまり subagent の子 turn が
-  走ったときだけ非 null。review では必ずそれがレビュー本体の turn。通常 turn でも codex が subagent を
-  使えば入りうる)。
+- 結果: stdout に JSON `{ threadId, turnId, reviewTurnId, childTurnIds, turnStatus, turnError, finalMessage, tokenUsage }`
+  (`childTurnIds` は自 thread に別 turnId で `turn/started` が届いた subagent の子 turn すべて。
+  `reviewTurnId` はその最初の 1 つで、review では必ずレビュー本体の turn。通常 turn でも codex が
+  subagent を使えば入りうる)。
 - 進捗: stderr に 1 行 1 イベント (コマンド実行・エージェントメッセージ)。Monitor で追える。
 - キャンセル: TaskStop (SIGTERM) で driver は `turn/interrupt` を送ってから終了する。
   server 側の turn も止まる (放置トークン消費なし)。review は subagent の子 turn で走るので、

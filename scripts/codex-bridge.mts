@@ -27,6 +27,13 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { parseArgs } from "node:util";
+import { isObjectOf, isString, isUndefinedableOf } from "./guard.mts";
+
+/** The message of anything thrown. Checks for the property rather than for Error-ness:
+ * a DOMException is not an Error on every runtime (bun), but it carries a message. */
+const hasMessage = isObjectOf({ message: isString });
+const errorMessage = (e: unknown): string => hasMessage(e) ? e.message : String(e);
+const hasErrnoCode = isObjectOf({ code: isUndefinedableOf(isString) });
 
 // Env override exists for tests (a stalled /readyz must be provable in seconds). Validated
 // below once usage() exists: Infinity would poll forever, NaN/negative would time out at once.
@@ -144,7 +151,7 @@ async function ready(dir: string, outputFile: string): Promise<void> {
         fs.linkSync(tmp, portFile);
       } catch (e) {
         fs.unlinkSync(tmp);
-        if ((e as { code?: string }).code === "EEXIST") {
+        if (hasErrnoCode(e) && e.code === "EEXIST") {
           fail(
             `${dir} was bound by a concurrent ready (port ${
               fs.readFileSync(portFile, "utf8").trim()
@@ -286,7 +293,7 @@ const { positionals } = (() => {
   try {
     return parseArgs({ args: process.argv.slice(2), strict: true, allowPositionals: true });
   } catch (e) {
-    usage((e as Error).message);
+    usage(errorMessage(e));
   }
 })();
 
