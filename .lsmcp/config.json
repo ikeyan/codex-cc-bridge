@@ -1,6 +1,6 @@
 {
   "$schema": "../vendor/lsmcp/lsmcp.schema.json",
-  "preset": "tsgo",
+  "preset": "typescript",
   "files": [
     "**/*.ts",
     "**/*.mts"

@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-B-h8l8uA.js";
-import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-BNFGSNov.js";
+import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-D_NupzB2.js";
 import { debugLogWithPrefix, errorLog, mcpDebugWithPrefix } from "./debugLog-LfbHS9a2.js";
 import "./configLoader-CZlYj_hr.js";
 import "./NodeFileSystemApi-CcTrKwya.js";
-import { dependencyMajor, installedPackageMajor } from "./packageVersion-DCtYpxhL.js";
 import { parseArgs } from "node:util";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { existsSync as existsSync$1, readdirSync } from "fs";
+import { existsSync as existsSync$1, readFileSync, readdirSync } from "fs";
 import { dirname, join as join$1 } from "path";
 import { execSync, spawn } from "child_process";
 import { platform } from "os";
@@ -271,6 +270,24 @@ function getNodeModulesCommand(binName, args = [], projectRoot) {
 }
 
 //#endregion
+//#region src/utils/packageVersion.ts
+/**
+* Major version of the package installed under `nodeModulesDir`, or undefined
+* when it is not installed or its package.json cannot be read.
+*/
+function installedPackageMajor(nodeModulesDir, packageName) {
+	const packageJsonPath = join$1(nodeModulesDir, packageName, "package.json");
+	if (!existsSync$1(packageJsonPath)) return void 0;
+	try {
+		const { version } = JSON.parse(readFileSync(packageJsonPath, "utf-8"));
+		const major = parseInt(String(version), 10);
+		return Number.isNaN(major) ? void 0 : major;
+	} catch {
+		return void 0;
+	}
+}
+
+//#endregion
 //#region src/utils/binFinder.ts
 /** `dir` followed by each of its ancestors up to the filesystem root. */
 function* selfAndAncestors(dir) {
@@ -331,6 +348,7 @@ function findBinary(strategy, projectRoot = process.cwd()) {
 				break;
 			}
 			case "node_modules": {
+				const args = item.args ?? defaultArgs;
 				for (const name of item.names) for (const dir of selfAndAncestors(projectRoot)) {
 					const nodeModules = join$1(dir, "node_modules");
 					const bin = join$1(nodeModules, ".bin", name);
@@ -349,7 +367,7 @@ function findBinary(strategy, projectRoot = process.cwd()) {
 					mcpDebugWithPrefix("BinFinder", `Found in node_modules: ${bin}`);
 					return {
 						command: bin,
-						args: defaultArgs
+						args
 					};
 				}
 				break;
@@ -559,7 +577,7 @@ async function runLanguageServerWithConfig(config, _positionals = [], customEnv)
 			config: { ...config },
 			languageId: config.preset || config.id || "custom"
 		};
-		const { createMcpServerManager } = await import("./mcpServerHelpers-B2u-tuXt.js");
+		const { createMcpServerManager } = await import("./mcpServerHelpers-BJDgSxCb.js");
 		const server = createMcpServerManager({
 			name: `lsmcp (${config.name})`,
 			version: "0.1.0"
@@ -667,14 +685,9 @@ async function detectProjectType(projectRoot) {
 	if (existsSync$1(packageJsonPath)) try {
 		const packageContent = await readFile(packageJsonPath, "utf-8");
 		const packageJson = JSON.parse(packageContent);
-		const typescriptMajor = dependencyMajor(projectRoot, packageJson, "typescript");
 		if (packageJson.devDependencies?.["@typescript/native-preview"] || packageJson.dependencies?.["@typescript/native-preview"]) detected.push({
 			preset: "tsgo",
 			reason: "Found @typescript/native-preview in package.json"
-		});
-		else if (existsSync$1(tsconfigPath) && typescriptMajor !== void 0 && typescriptMajor >= 7) detected.push({
-			preset: "tsgo",
-			reason: `Found typescript ${typescriptMajor} (native tsc --lsp) in package.json`
 		});
 		else if (existsSync$1(tsconfigPath)) detected.push({
 			preset: "typescript",
@@ -980,7 +993,7 @@ async function indexCommand(projectRoot, isFromInit = false, configLoader, adapt
 			errorLog(`Failed to start ${command}: ${error.message}`);
 			if (error.message.includes("ENOENT")) {
 				errorLog(`Make sure ${adapterConfig.bin} is installed and in PATH`);
-				if (adapterConfig.presetId === "tsgo") errorLog("Install with: npm install -D typescript@7  # or: @typescript/native-preview");
+				if (adapterConfig.presetId === "tsgo") errorLog("Install with: npm install -g @typescript/native-preview");
 				else if (adapterConfig.presetId === "typescript") errorLog("Install with: npm install -g typescript typescript-language-server");
 				else if (adapterConfig.presetId === "rust-analyzer") errorLog("Install rust-analyzer from: https://rust-analyzer.github.io/");
 			}
@@ -1009,7 +1022,7 @@ async function indexCommand(projectRoot, isFromInit = false, configLoader, adapt
 		if (error instanceof Error && error.message.includes("Command not found")) {
 			if (config.preset === "tsgo") {
 				errorLog("\nTo install tsgo:");
-				errorLog("  npm install -D typescript@7  # or: @typescript/native-preview");
+				errorLog("  npm install -g @typescript/native-preview");
 				errorLog("\nAlternatively, you can use a different preset:");
 				errorLog("  lsmcp init -p typescript");
 			} else if (config.preset === "typescript") {
@@ -1319,7 +1332,7 @@ async function checkAvailableServers(projectRoot, languages, adapterRegistry$1) 
 					server.installCommand = "npm install -g typescript typescript-language-server";
 					break;
 				case "tsgo":
-					server.installCommand = "npm install -D typescript@7  # or: @typescript/native-preview";
+					server.installCommand = "npm install -g @typescript/native-preview";
 					break;
 				case "pyright":
 					server.installCommand = "npm install -g pyright";
@@ -1392,7 +1405,7 @@ async function doctorCommand(projectRoot, options) {
 				server.installCommand = "npm install -g typescript typescript-language-server";
 				break;
 			case "tsgo":
-				server.installCommand = "npm install -D typescript@7  # or: @typescript/native-preview";
+				server.installCommand = "npm install -g @typescript/native-preview";
 				break;
 			case "pyright":
 				server.installCommand = "npm install -g pyright";
@@ -1609,7 +1622,7 @@ async function mainWithConfigLoader() {
 			debug$1("[lsmcp] Loading config from .lsmcp/config.json");
 			lspSources.configFile = configPath;
 		} else if (!hasConfigFile && !hasExplicitConfig && !values.files) {
-			const { detectEnvironment, formatEnvironmentGuide } = await import("./environmentDetector-Do_qWllH.js");
+			const { detectEnvironment, formatEnvironmentGuide } = await import("./environmentDetector-Dsb5zIaL.js");
 			const detected = detectEnvironment(process.cwd());
 			if (detected) {
 				errorLog(formatEnvironmentGuide(detected));
@@ -1697,8 +1710,8 @@ async function listTools(presetName, disableList) {
 			config = result.config;
 			console.log(`Preset: ${presetName}\n`);
 		}
-		const { getAllAvailableTools } = await import("./getAllTools-DdqLuDjo.js");
-		const { filterUnsupportedTools: filterUnsupportedTools$1 } = await import("./toolFilters-AeT0TaY6.js");
+		const { getAllAvailableTools } = await import("./getAllTools-Ic1HnKtj.js");
+		const { filterUnsupportedTools: filterUnsupportedTools$1 } = await import("./toolFilters-DnaKbFIC.js");
 		const allTools = await getAllAvailableTools(config);
 		let filteredTools = allTools;
 		if (config?.disable && config.disable.length > 0) {
@@ -1710,10 +1723,10 @@ async function listTools(presetName, disableList) {
 			console.log(`User disabled tools: ${disabledTools.join(", ")}\n`);
 		}
 		if (presetName && config) try {
-			const { getCapabilitiesForPreset } = await import("./capabilityChecker-BHu3euGK.js");
+			const { getCapabilitiesForPreset } = await import("./capabilityChecker-Czy_SAiM.js");
 			const capabilities = await getCapabilitiesForPreset(config);
 			if (capabilities) {
-				const { filterToolsByCapabilities: filterToolsByCapabilities$1 } = await import("./toolFilters-AeT0TaY6.js");
+				const { filterToolsByCapabilities: filterToolsByCapabilities$1 } = await import("./toolFilters-DnaKbFIC.js");
 				const beforeCount = filteredTools.length;
 				filteredTools = filterToolsByCapabilities$1(filteredTools, capabilities);
 				const removedCount = beforeCount - filteredTools.length;

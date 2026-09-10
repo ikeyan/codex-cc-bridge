@@ -2,7 +2,7 @@
   "mcpServers": {
     "lsmcp": {
       "command": "node",
-      "args": ["vendor/lsmcp/lsmcp.js", "-p", "tsgo"]
+      "args": ["vendor/lsmcp/lsmcp.js", "-p", "typescript"]
     }
   }
 }
