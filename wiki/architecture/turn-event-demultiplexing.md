@@ -16,23 +16,27 @@ updated: 2026-09-06T07:10:31Z
 実装は [`scripts/codex-turn.mts`](../../scripts/codex-turn.mts) の `ws.onmessage` と
 `handleTurnEvent`。
 
-## 3 段のフィルタ
+## 2 段のフィルタ (自 turn が決まってから)
 
-1. 自分の `threadId` が確定するまでは thread/turn スコープの通知を**すべて捨てる**。
-2. `params.threadId` が自分のものと違う通知を捨てる (サブエージェントが張った子 thread、
-   同じ server 上の無関係な thread)。
-3. `turnId` (`turn/completed` では `params.turn.id`) が自 turn (`turn`) と違うものを捨てる。
+自 turn (`turn` = 自分の turn id と、それが載っている thread) が決まるまで、turn スコープの通知は
+**捨てずに無条件でバッファ**する (次節)。決まったあとは `handleTurnEvent` が 2 段で絞る。
 
-3 段目が無いと、**他人の turn の完了で自分が完了扱いになる**。これは黙って誤った結果を返す
+1. `params.threadId` が所有 thread と違う通知を捨てる (サブエージェントが張った子 thread、
+   同じ server 上の無関係な thread)。所有 thread は普段は自分が始めた thread だが、
+   `review/start` が review を別 thread に移した場合はそちら。
+2. `turnId` (`turn/completed` では `params.turn.id`) が自 turn と違うものを捨てる。
+
+2 段目が無いと、**他人の turn の完了で自分が完了扱いになる**。これは黙って誤った結果を返す
 バグになるので、テストで pin してある (`tests/codex-turn.test.mjs` の
 "events from unrelated threads and turns are ignored")。
 
 ## turn id 確定前に届くイベント
 
 `turn/start` の応答と、その turn の `item/completed` が**同じ TCP チャンクで届くことがある**。
-このとき `await` はまだ戻っておらず自 turn (`turn`) は未定なので、素直に書くと 3 段目の
-フィルタが自分のイベントを捨ててしまう。そこで `turn` が決まるまでの間の thread スコープ
-イベントを `earlyEvents` に溜め、turn id が決まった時点で `turnIdentified()` が**同じハンドラに
+このとき `await` はまだ戻っておらず自 turn は未定なので、素直に書くとフィルタが自分のイベントを
+捨ててしまう。所有 thread も同じ応答で初めて分かる (移動した review の子 turn はその thread で
+届く) ので、thread で絞ることもできない。そこで `turn` が決まるまでの turn スコープイベントを
+`earlyEvents` に**無条件で**溜め、turn id が決まった時点で `turnIdentified()` が**同じハンドラに
 replay** する。バッファは 1 箇所・replay 先は 1 経路に保ってあり、フィルタのロジックは二重化しない。
 
 ## タイムアウトの非対称
