@@ -336,32 +336,14 @@ function findBinary(strategy, projectRoot = process.cwd()) {
 		switch (item.type) {
 			case "venv": {
 				const venvDirs = item.venvDirs || [".venv", "venv"];
-				for (const name of item.names) {
-					for (const venvDir of venvDirs) {
-						const venvBin = join$1(projectRoot, venvDir, "bin", name);
-						if (existsSync$1(venvBin)) {
-							mcpDebugWithPrefix("BinFinder", `Found in Python ${venvDir}: ${venvBin}`);
-							return {
-								command: venvBin,
-								args: defaultArgs
-							};
-						}
-					}
-					let currentDir = projectRoot;
-					let parentDir = dirname(currentDir);
-					while (parentDir !== currentDir) {
-						for (const venvDir of venvDirs) {
-							const parentVenvBin = join$1(parentDir, venvDir, "bin", name);
-							if (existsSync$1(parentVenvBin)) {
-								mcpDebugWithPrefix("BinFinder", `Found in parent ${venvDir}: ${parentVenvBin}`);
-								return {
-									command: parentVenvBin,
-									args: defaultArgs
-								};
-							}
-						}
-						currentDir = parentDir;
-						parentDir = dirname(currentDir);
+				for (const name of item.names) for (const dir of selfAndAncestors(projectRoot)) for (const venvDir of venvDirs) {
+					const venvBin = join$1(dir, venvDir, "bin", name);
+					if (existsSync$1(venvBin)) {
+						mcpDebugWithPrefix("BinFinder", `Found in Python ${venvDir}: ${venvBin}`);
+						return {
+							command: venvBin,
+							args: defaultArgs
+						};
 					}
 				}
 				break;
