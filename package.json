@@ -8,7 +8,10 @@
     "test": "node scripts/check.mts"
   },
   "devDependencies": {
+    "@mizchi/lsmcp": "^0.10.0",
     "@types/node": "^26",
+    "fast-check": "^4.9.0",
+    "type-fest": "^5.9.0",
     "typescript": "^7"
   }
 }

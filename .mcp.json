@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lsmcp": {
+      "command": "node",
+      "args": ["vendor/lsmcp/lsmcp.js", "-p", "typescript"]
+    }
+  }
+}

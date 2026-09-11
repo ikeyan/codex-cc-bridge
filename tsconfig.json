@@ -2,13 +2,19 @@
   "compilerOptions": {
     "strict": true,
     "noEmit": true,
-    "target": "es2023",
+    "target": "es2024",
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "lib": ["es2023"],
+    "lib": ["es2024"],
     "types": ["node"],
     "erasableSyntaxOnly": true,
+    "allowImportingTsExtensions": true,
     "skipLibCheck": true
   },
-  "files": ["scripts/codex-turn.mts", "scripts/codex-bridge.mts", "scripts/check.mts"]
+  "files": [
+    "scripts/codex-turn.mts",
+    "scripts/codex-bridge.mts",
+    "scripts/check.mts",
+    "scripts/wiki-symbols.mts"
+  ]
 }

@@ -7,10 +7,10 @@
 // (type stripping), no build step.
 //
 // SECURITY INVARIANTS (do not weaken; pinned by tests/codex-turn.test.mjs):
-//   - The endpoint must be loopback (ws://127.0.0.1 / localhost / ::1); the
-//     capability token is never sent anywhere else.
-//   - A capability token is REQUIRED (--token-file or CODEX_BRIDGE_TOKEN_FILE);
-//     the driver refuses to talk to an unauthenticated server.
+//   - The endpoint is always ws://127.0.0.1:<port>, port and capability token both
+//     read from the session dir (--session / CODEX_BRIDGE_SESSION) that the launch
+//     helper wrote. No flag takes a host, URL, port or token path, so the token
+//     cannot be sent anywhere but loopback, and there is no unauthenticated mode.
 //   - Before any thread is started, the server's containment is probed via
 //     command/exec: $HOME and /tmp (outside the sandbox-writable subtrees)
 //     must NOT be writable, and the target cwd MUST be writable (server inside
@@ -26,100 +26,135 @@
 // the only mode whose side effects stay ⊆ the Claude sandbox. Never combine with
 // dangerouslyDisableSandbox. See wiki/security/ and ikeyan/canon facts/codex/.
 
+import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
+import {
+  isNullishOf,
+  isNumber,
+  isObjectOf,
+  isOneOf,
+  isReadonlyArrayOf,
+  isString,
+  isUndefinedableOf,
+} from "./guard.mts";
 
 const PINNED_THREAD_SANDBOX = "danger-full-access";
 const PINNED_TURN_SANDBOX_POLICY = Object.freeze({ type: "dangerFullAccess" });
 const PINNED_APPROVAL_POLICY = "never";
 const PROBE_TIMEOUT_MS = 15_000;
-// Control-plane RPCs (initialize/thread/turn-start) must answer promptly; only
-// waiting for turn *completion* is unbounded. Env override exists for tests.
-const CONTROL_TIMEOUT_MS = Number(process.env.CODEX_BRIDGE_CONTROL_TIMEOUT_MS ?? 30_000);
-const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
-// --- Protocol types (the small subset of the codex app-server v2 API we use;
-// authoritative schemas: `codex app-server generate-json-schema`) -----------
+// --- Protocol guards (the small subset of the codex app-server v2 API we use;
+// authoritative schemas: `codex app-server generate-json-schema`). Every frame from the
+// wire and every response is checked against these at the boundary, so the logic below
+// only ever sees the shapes it asked for (no `?.`, no casts). -----------------------------
 
-interface JsonRpcError {
-  code: number;
-  message: string;
-  data?: unknown;
-}
+type Guarded<G> = G extends (value: unknown) => value is infer T ? T : never;
+/** Property may hold anything (or be absent); we carry it through without looking. */
+const anyValue = (_: unknown): boolean => true;
+const isUnknown = (_: unknown): _ is unknown => true;
+/** The server serializes an absent `Option` as `null` (measured), so "optional" on the wire
+ * means absent, undefined or null. */
+const optString = isUndefinedableOf(isString);
+const optNullString = isNullishOf(isString);
+const optNullNumber = isNullishOf(isNumber);
+/** The message of anything thrown. Checks for the property rather than for Error-ness:
+ * a DOMException is not an Error on every runtime (bun), but it carries a message. */
+const hasMessage = isObjectOf({ message: isString });
+const errorMessage = (e: unknown): string => hasMessage(e) ? e.message : String(e);
 
-/** Incoming frame: response, notification, or server->client request. */
-interface IncomingMessage {
-  id?: number;
-  method?: string;
-  params?: NotificationParams;
-  result?: unknown;
-  error?: JsonRpcError;
-}
-
-interface AgentItem {
-  type?: string;
-  phase?: string;
-  text?: string;
-  command?: string;
-  status?: string;
-  exitCode?: number;
-}
-
-interface Turn {
-  id?: string;
-  status?: string;
-  error?: unknown;
-  items?: AgentItem[];
-}
-
-interface NotificationParams {
-  threadId?: string;
-  turnId?: string;
-  item?: AgentItem;
-  tokenUsage?: unknown;
-  turn?: Turn;
-}
-
-interface TurnCompletedParams {
-  threadId?: string;
-  turn?: Turn;
-}
-
-interface ThreadResponse {
-  thread?: { id?: string };
+const isJsonRpcError = isObjectOf({ code: isNumber, message: isString, data: anyValue });
+/** JSON-RPC ids: ours are numbers; the server may use strings for its own requests. */
+const isRequestId = (v: unknown): v is string | number => isString(v) || isNumber(v);
+/** The fields of a ThreadItem we look at; `phase` and `exitCode` are nullable per schema. */
+const isAgentItem = isObjectOf({
+  type: isString,
+  phase: optNullString,
+  text: optString,
+  command: optString,
+  status: optString,
+  exitCode: optNullNumber,
+});
+const isTurn = isObjectOf({
+  id: isString,
+  status: isString,
+  error: anyValue,
+  items: isReadonlyArrayOf(isAgentItem),
+});
+/** Any frame: response (id + result/error), notification (method, no id), or
+ * server->client request (id + method). Params are checked per method. */
+const isIncomingMessage = isObjectOf({
+  id: isUndefinedableOf(isRequestId),
+  method: optString,
+  params: anyValue,
+  result: anyValue,
+  error: isUndefinedableOf(isJsonRpcError),
+});
+const isItemCompleted = isObjectOf({ threadId: isString, turnId: isString, item: isAgentItem });
+/** turn/started and turn/completed. */
+const isTurnEvent = isObjectOf({ threadId: isString, turn: isTurn });
+type TurnEvent = Guarded<typeof isTurnEvent>;
+/** CodexErrorInfo is either a bare code ("unauthorized", "rateLimitExceeded", ...) or an
+ * object naming the failed stage, which may carry the upstream HTTP status. */
+const isHttpStage = isUndefinedableOf(isObjectOf({ httpStatusCode: optNullNumber }));
+const isCodexErrorInfo = (v: unknown): v is Guarded<typeof isCodexErrorObject> | string =>
+  isString(v) || isCodexErrorObject(v);
+const isCodexErrorObject = isObjectOf({
+  responseStreamDisconnected: isHttpStage,
+  responseStreamConnectionFailed: isHttpStage,
+  httpConnectionFailed: isHttpStage,
+});
+const isErrorEvent = isObjectOf({
+  threadId: isString,
+  turnId: isString,
+  willRetry: anyValue,
+  error: isObjectOf({
+    message: isString,
+    codexErrorInfo: isNullishOf(isCodexErrorInfo),
+  }),
+});
+/** The server cannot authenticate to OpenAI: either the bare code or a 401 on any stage. */
+const isUnauthorized = (info: Guarded<typeof isCodexErrorInfo> | null | undefined): boolean =>
+  info === "unauthorized" ||
+  (isCodexErrorObject(info) &&
+    [
+      info.responseStreamDisconnected,
+      info.responseStreamConnectionFailed,
+      info.httpConnectionFailed,
+    ]
+      .some((stage) => stage?.httpStatusCode === 401));
+const isTokenUsageEvent = isObjectOf({ threadId: isString, tokenUsage: anyValue });
+const isThreadResponse = isObjectOf({
+  thread: isObjectOf({ id: isString }),
   /** Model the server actually resolved for the thread (echoes `model` when we send one). */
-  model?: string;
-  reasoningEffort?: string | null;
-}
-
-interface TurnStartResponse {
-  turn?: Turn;
-}
-
-interface ReviewStartResponse {
-  reviewThreadId?: string;
-  turn?: Turn;
-}
-
-interface CommandExecResponse {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-}
+  model: isString,
+  reasoningEffort: optNullString,
+});
+const isTurnStartResponse = isObjectOf({ turn: isTurn });
+const isReviewStartResponse = isObjectOf({ reviewThreadId: isString, turn: isTurn });
+const isCommandExecResponse = isObjectOf({
+  exitCode: isNumber,
+  stdout: isString,
+  stderr: isString,
+});
 
 // --- CLI --------------------------------------------------------------------
 
 function usage(message?: string): never {
   if (message) console.error(`codex-turn: ${message}`);
   console.error(
-    "usage: codex-turn.mts --port N --token-file FILE [--cwd DIR] [--thread ID] [--schema FILE]\n" +
-      "                      [--model M] [--effort E] [--url ws://127.0.0.1:N instead of --port]\n" +
-      "                      [--prompt TEXT | prompt on stdin] [--review-target JSON]\n" +
-      "The app-server must already be running inside the Claude sandbox, with auth:\n" +
-      "  codex app-server --listen ws://127.0.0.1:0 --ws-auth capability-token --ws-token-file FILE\n" +
-      "  (port 0 lets the OS pick a free port; the server prints it as `listening on: ws://...`)",
+    "usage: codex-turn.mts --session DIR [--cwd DIR] [--thread ID] [--schema FILE]\n" +
+      "                      [--model M] [--effort E] < prompt.txt\n" +
+      "       codex-turn.mts --session DIR --review uncommitted|base|commit|custom\n" +
+      "                      [--target-file FILE] [--cwd DIR] [--thread ID] [--model M]\n" +
+      "  base/commit take the branch name / sha from FILE (plain text, one line);\n" +
+      "  custom takes its instructions on stdin. Neither ever passes through a shell.\n" +
+      "DIR is the session dir from `codex-bridge.mts init` (token) + `ready` (port); it can\n" +
+      "also come from CODEX_BRIDGE_SESSION. The app-server it points at must be running inside\n" +
+      "the Claude sandbox (see the codex-bridge skill's launch recipe).",
   );
   process.exit(2);
 }
@@ -136,75 +171,138 @@ function parseCli(args: string[]) {
         schema: { type: "string" },
         model: { type: "string" },
         effort: { type: "string" },
-        port: { type: "string" },
-        url: { type: "string" },
-        prompt: { type: "string" },
-        "review-target": { type: "string" },
-        "token-file": { type: "string" },
+        session: { type: "string" },
+        review: { type: "string" },
+        "target-file": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
     }).values;
   } catch (e) {
-    usage((e as Error).message);
+    usage(errorMessage(e));
   }
 }
 
 const opts = parseCli(process.argv.slice(2));
 const cwd: string = opts.cwd ?? process.cwd();
-// No default port on purpose. The launch recipe starts the server on port 0 and reads the
-// port the OS assigned, so there is no well-known port to fall back to — a fixed default
-// would silently aim at whatever stale server happens to hold it.
-const portArg = opts.port ?? process.env.CODEX_BRIDGE_PORT;
-if (!opts.url && !portArg) {
+// The session dir is the only way to name a server: no default port on purpose. The
+// launch recipe starts the server on port 0 and `ready` publishes the port the OS
+// assigned into the dir, so a fixed default would silently aim at whatever stale server
+// happens to hold it. Reading the token from the same dir means there is no argv path
+// that could point the token at a non-loopback host, and no unauthenticated mode.
+const sessionDir = opts.session ?? process.env.CODEX_BRIDGE_SESSION;
+if (!sessionDir) {
   usage(
-    "no endpoint: pass --port N (or set CODEX_BRIDGE_PORT, or --url). The launch recipe in the codex-bridge skill prints the port the app-server was given",
+    "no session: pass --session DIR (or set CODEX_BRIDGE_SESSION) — the dir printed by `codex-bridge.mts init` in the codex-bridge skill's launch recipe",
   );
 }
-const url: string = opts.url ?? `ws://127.0.0.1:${Number(portArg)}`;
-// The capability token must never leave this machine: loopback only.
-let endpoint: URL;
-try {
-  endpoint = new URL(url);
-} catch {
-  usage(`invalid --url: ${url}`);
+function readSessionFile(name: string, missingHint: string): string {
+  try {
+    return fs.readFileSync(path.join(sessionDir!, name), "utf8").trim();
+  } catch (e) {
+    usage(`session ${sessionDir}: cannot read ${name} (${errorMessage(e)}). ${missingHint}`);
+  }
 }
-if (endpoint.protocol !== "ws:" || !LOOPBACK_HOSTS.has(endpoint.hostname)) {
+const token = readSessionFile("token", "Is this the dir printed by `codex-bridge.mts init`?");
+if (!token) usage(`session ${sessionDir}: token file is empty`);
+const portText = readSessionFile(
+  "port",
+  "Run `codex-bridge.mts ready DIR <app-server task output file>` first; it publishes the port here.",
+);
+if (!/^[0-9]{1,5}$/.test(portText) || Number(portText) < 1 || Number(portText) > 65535) {
   usage(
-    `refusing non-loopback endpoint ${url} (the capability token and prompts must stay on this machine)`,
+    `session ${sessionDir}: port file must hold a TCP port (1-65535), got ${
+      JSON.stringify(portText)
+    }`,
   );
 }
-const port = endpoint.port || "80";
-const reviewTargetArg = opts["review-target"];
-// review/start itself carries only {threadId, target, delivery}, so a prompt, an
-// outputSchema and a per-turn effort have nowhere to go. `model` is different: it is a
-// thread-level setting, and the review runs on the thread we start, so it does apply.
-if (reviewTargetArg && (opts.prompt !== undefined || opts.schema || opts.effort)) {
+const port = Number(portText);
+const url = `ws://127.0.0.1:${port}`;
+// --- Review target ------------------------------------------------------------
+// The mode is a flag; the value (branch name, sha, instructions) never is. Branch names
+// may legally contain `$(...)` or a single quote (measured), so no quoting discipline in
+// the agent's command line is safe; a file written by the Write tool, or stdin, is.
+const REVIEW_MODES = ["uncommitted", "base", "commit", "custom"] as const;
+const reviewMode = isUndefinedableOf(isOneOf(REVIEW_MODES))(opts.review)
+  ? opts.review
+  : usage(`--review must be one of ${REVIEW_MODES.join("|")}, got ${JSON.stringify(opts.review)}`);
+// review/start itself carries only {threadId, target, delivery}, so an outputSchema and
+// a per-turn effort have nowhere to go (and stdin is the target, not a prompt).
+// `model` is different: it is a thread-level setting, and the review runs on the thread
+// we start, so it does apply.
+if (reviewMode !== undefined && (opts.schema || opts.effort)) {
   usage(
-    "--review-target cannot be combined with a prompt, --schema or --effort (review/start has no slot for them; --model is fine, it rides on the thread)",
+    "--review cannot be combined with --schema or --effort (review/start has no slot for them; --model is fine, it rides on the thread)",
   );
 }
-// "-" reads the target JSON from stdin, so callers never have to shell-quote it.
-const reviewTarget: unknown = reviewTargetArg
-  ? JSON.parse(reviewTargetArg === "-" ? fs.readFileSync(0, "utf8") : reviewTargetArg)
-  : null;
-let prompt = opts.prompt;
-if (!reviewTarget && prompt === undefined) prompt = fs.readFileSync(0, "utf8");
-if (!reviewTarget && !prompt!.trim()) usage("empty prompt");
-const outputSchema: unknown = opts.schema
-  ? JSON.parse(fs.readFileSync(opts.schema, "utf8"))
-  : undefined;
-// Capability token for a server started with --ws-auth capability-token
-// (works on loopback; measured). REQUIRED: an unauthenticated resident server
-// would be drivable by any local process, so refuse to be part of that setup.
-const tokenFile = opts["token-file"] ?? process.env.CODEX_BRIDGE_TOKEN_FILE;
-if (!tokenFile) {
+const needsTargetFile = reviewMode === "base" || reviewMode === "commit";
+if (needsTargetFile && !opts["target-file"]) {
   usage(
-    "a capability token is required: pass --token-file or set CODEX_BRIDGE_TOKEN_FILE (see the codex-bridge skill's launch recipe)",
+    `--review ${reviewMode} needs --target-file FILE holding the ${
+      reviewMode === "base" ? "branch name" : "commit sha"
+    }`,
   );
 }
-const token = fs.readFileSync(tokenFile, "utf8").trim();
-if (!token) usage(`token file ${tokenFile} is empty`);
+if (!needsTargetFile && opts["target-file"]) {
+  usage(
+    `--target-file only applies to --review base|commit (got --review ${reviewMode ?? "<none>"})`,
+  );
+}
+/** One non-empty line of plain text from FILE: only the line terminator is removed, since a
+ * branch name may legally begin or end with Unicode whitespace and trim() would silently
+ * retarget the review. */
+function readTargetLine(file: string, what: string): string {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    usage(`--target-file ${file}: ${errorMessage(e)}`);
+  }
+  const line = text.replace(/\r?\n$/, "");
+  if (!line || line.includes("\n")) {
+    usage(`${file} must hold exactly one non-empty line (the ${what})`);
+  }
+  return line;
+}
+const stdinText = (): string => fs.readFileSync(0, "utf8");
+let reviewTarget: Record<string, string> | null = null;
+if (reviewMode === "uncommitted") reviewTarget = { type: "uncommittedChanges" };
+else if (reviewMode === "base") {
+  reviewTarget = {
+    type: "baseBranch",
+    branch: readTargetLine(opts["target-file"]!, "branch name"),
+  };
+} else if (reviewMode === "commit") {
+  reviewTarget = { type: "commit", sha: readTargetLine(opts["target-file"]!, "commit sha") };
+} else if (reviewMode === "custom") {
+  const instructions = stdinText();
+  if (!instructions.trim()) usage("--review custom: empty instructions (stdin)");
+  reviewTarget = { type: "custom", instructions };
+}
+// The prompt always comes on stdin: callers Write it to a file and redirect, so its
+// text never passes through a shell (see the skill). No --prompt flag on purpose.
+const prompt = reviewTarget ? undefined : stdinText();
+if (prompt !== undefined && !prompt.trim()) usage("empty prompt (stdin)");
+function readSchema(file: string): unknown {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (e) {
+    usage(`--schema ${file}: ${errorMessage(e)}`);
+  }
+}
+const outputSchema: unknown = opts.schema ? readSchema(opts.schema) : undefined;
+// Control-plane RPCs (initialize/thread/turn-start) must answer promptly; only
+// waiting for turn *completion* is unbounded. Env override exists for tests; a
+// value that is not a positive number would become setTimeout(NaN) = fire at once.
+const controlTimeoutEnv = process.env.CODEX_BRIDGE_CONTROL_TIMEOUT_MS;
+const CONTROL_TIMEOUT_MS = controlTimeoutEnv === undefined || controlTimeoutEnv === ""
+  ? 30_000
+  : Number(controlTimeoutEnv);
+if (!(Number.isFinite(CONTROL_TIMEOUT_MS) && CONTROL_TIMEOUT_MS > 0)) {
+  usage(
+    `CODEX_BRIDGE_CONTROL_TIMEOUT_MS must be a positive number of ms, got ${controlTimeoutEnv}`,
+  );
+}
 
 // --- Telling codex where it is ---------------------------------------------
 // codex has no idea it is inside the Claude Code sandbox: it reads a failed write to
@@ -262,71 +360,166 @@ const progress = (event: string, detail: Record<string, unknown>): void => {
 // --- Connection and JSON-RPC plumbing ----------------------------------------
 
 // Node's built-in WebSocket (undici) supports the non-standard `headers` option.
-const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } } as never);
+const ws = new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } });
 let nextId = 1;
 interface PendingRequest {
-  resolve: (value: unknown) => void;
-  reject: (error: Error) => void;
   method: string;
+  /** Checks the result against the guard the caller gave, resolving or rejecting. */
+  settle: (result: unknown) => void;
+  reject: (error: Error) => void;
 }
 const pending = new Map<number, PendingRequest>();
+
+/** `p`, or a TimeoutError once `ms` have passed. The timer never holds the process open. */
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  return Promise.race([
+    p,
+    sleep(ms, undefined, { ref: false }).then(() => {
+      throw new DOMException(`${what}: no response after ${ms}ms`, "TimeoutError");
+    }),
+  ]);
+}
+
+const send = (msg: object): void => ws.send(JSON.stringify(msg));
+/** A request whose response must satisfy `guard` (else it rejects: the shape is the contract). */
+function request<T>(
+  method: string,
+  params: unknown,
+  guard: (value: unknown) => value is T,
+): Promise<T> {
+  const id = nextId++;
+  const { promise, resolve, reject } = Promise.withResolvers<T>();
+  pending.set(id, {
+    method,
+    reject,
+    settle: (result) => {
+      if (guard(result)) resolve(result);
+      else {reject(
+          new Error(`${method}: response has an unexpected shape: ${JSON.stringify(result)}`),
+        );}
+    },
+  });
+  send({ jsonrpc: "2.0", id, method, params });
+  return promise;
+}
+/** request() with a deadline — for control-plane calls that must answer promptly. */
+const boundedRequest = <T,>(
+  method: string,
+  params: unknown,
+  guard: (value: unknown) => value is T,
+  timeoutMs = CONTROL_TIMEOUT_MS,
+): Promise<T> => withTimeout(request(method, params, guard), timeoutMs, method);
+/** boundedRequest() for preflight steps: also gives up as soon as the run's outcome is
+ * decided (an abort during preflight must not go on to create a thread and a turn just to
+ * interrupt them). The start request itself is NOT cut short: once sent, the server may have
+ * accepted the turn, and only its response (or timeout) says whether there is one to stop. */
+const controlRequest = <T,>(
+  method: string,
+  params: unknown,
+  guard: (value: unknown) => value is T,
+  timeoutMs = CONTROL_TIMEOUT_MS,
+): Promise<T> => untilDecided(boundedRequest(method, params, guard, timeoutMs));
+
+// --- Lifecycle: values that are decided exactly once -------------------------
+// All lifecycle state is a value that is set at most once and can be awaited: a promise.
+// Resolving a promise twice is a no-op, so "a second SIGTERM", "a 401 after completion",
+// "turn/completed racing the interrupt response" need no special cases: they are just late
+// resolves. The event grammar that says when each value is decided (or known to never
+// arrive) is in wiki/architecture/turn-event-demultiplexing.md.
+
+/** A promise whose value can also be read synchronously once resolved (the event handlers
+ * filter by turn id without awaiting). */
+class Once<T> {
+  readonly promise: Promise<T>;
+  readonly #resolve: (value: T) => void;
+  #value: { v: T } | undefined;
+  constructor() {
+    const { promise, resolve } = Promise.withResolvers<T>();
+    this.promise = promise;
+    this.#resolve = resolve;
+  }
+  /** First call wins; later calls are no-ops. */
+  set(value: T): void {
+    if (this.#value !== undefined) return;
+    this.#value = { v: value };
+    this.#resolve(value);
+  }
+  get value(): T | undefined {
+    return this.#value?.v;
+  }
+}
+
+/** How this driver run ends. Set from wherever the ending is decided; acted on in one place. */
+type Outcome =
+  | { kind: "completed"; params: TurnEvent }
+  /** Interrupt whatever we own on the server (bounded), then exit with `code`. */
+  | { kind: "aborted"; reason: string; code: number }
+  /** Nothing to interrupt (or no connection to do it over): report and exit 1. */
+  | { kind: "failed"; message: string };
+const outcome = Promise.withResolvers<Outcome>();
+
+/** `p`, unless the run's outcome gets decided first — then a rejection, so whatever step of
+ * run() was waiting stops instead of carrying on after an abort. */
+function untilDecided<T>(p: Promise<T>): Promise<T> {
+  return Promise.race([
+    p,
+    outcome.promise.then(() => {
+      throw new Error("the run ended before this step completed");
+    }),
+  ]);
+}
+
+/** What we own on the server, as it becomes known. `turn` is our turn and the thread it
+ * runs on (normally ours; a review the server moved elsewhere is still ours to interrupt).
+ * `children` are the subagent turns announced on our thread (turn/started with another
+ * id): the one a review runs in, or any a plain turn spawns. Interrupting only the parent
+ * does not stop them (measured), so all of them are interrupt targets; `firstChild` lets a
+ * review wait for its own. `runSettled` is run() having ended, by success or throw: after
+ * it, `turn` is either set or never will be. */
 let threadId: string | undefined = opts.thread;
-let activeTurnId: string | null = null;
-let startRequested = false;
+const runSettled = new Once<true>();
+const turn = new Once<{ threadId: string; turnId: string }>();
+const children = new Set<string>();
+/** The first child, awaitable: a review waits for it (it is where the review runs). */
+const firstChild = new Once<string>();
+/** Errors naming a turn we do not (yet) know. A review's child can emit its 401 before its
+ * turn/started; an earlier turn of a resumed thread can emit a late one. Only a turn/started
+ * for that id decides which, so hold them until then. */
+const deferredErrors = new Map<string, Guarded<typeof isErrorEvent>[]>();
+const turnDone = new Once<TurnEvent>();
+
 let finalAnswer: string | null = null;
 let lastAgentMessage: string | null = null;
 let usageInfo: unknown = null;
-let settled = false;
-let resolveTurn!: (params: TurnCompletedParams) => void;
-const turnDone = new Promise<TurnCompletedParams>((r) => (resolveTurn = r));
 
-function fail(message: string, code = 1): never {
-  if (!settled) {
-    settled = true;
-    console.error(`codex-turn: ${message}`);
-  }
-  process.exit(code);
+/** Abort the run: the resident turn is interrupted (bounded) before exiting. */
+const abort = (reason: string, code: number): void => {
+  outcome.resolve({ kind: "aborted", reason, code });
+};
+/** End the run without interrupting anything (used inside run(), where it also stops it). */
+function fail(message: string): never {
+  throw new Error(message);
 }
 
 ws.onerror = () => {
-  if (settled) return;
-  fail(
-    `cannot reach app-server at ${url} (not running, or it rejected the handshake).\n` +
+  outcome.resolve({
+    kind: "failed",
+    message: `cannot reach app-server at ${url} (not running, or it rejected the handshake).\n` +
       `- If http://127.0.0.1:${port}/readyz succeeds, the server is up but the token does not match\n` +
-      `  (it probably belongs to another session; use a different port).\n` +
-      `- Otherwise start it inside the Claude sandbox first (run_in_background Bash):\n` +
-      `  codex app-server --listen ${url} --ws-auth capability-token --ws-token-file <token-file>`,
-  );
+      `  (session ${sessionDir} points at another session's server; run the launch recipe again).\n` +
+      `- Otherwise the server died: start a new one with the launch recipe (fresh init + ready).`,
+  });
 };
 ws.onclose = () => {
-  if (!settled) fail("app-server connection closed before the turn completed");
-};
-
-const send = (msg: object): void => ws.send(JSON.stringify(msg));
-function request<T>(method: string, params: unknown): Promise<T> {
-  const id = nextId++;
-  return new Promise<T>((resolve, reject) => {
-    pending.set(id, { resolve: resolve as (value: unknown) => void, reject, method });
-    send({ jsonrpc: "2.0", id, method, params });
+  outcome.resolve({
+    kind: "failed",
+    message: "app-server connection closed before the turn completed",
   });
-}
-/** request() with a deadline — for control-plane calls that must answer promptly. */
-function controlRequest<T>(
-  method: string,
-  params: unknown,
-  timeoutMs = CONTROL_TIMEOUT_MS,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return Promise.race([
-    request<T>(method, params),
-    new Promise<never>((_, rej) => {
-      timer = setTimeout(
-        () => rej(new Error(`${method}: no response after ${timeoutMs}ms`)),
-        timeoutMs,
-      );
-    }),
-  ]).finally(() => clearTimeout(timer));
-}
+  // Anything still waiting on the server (an interrupt in flight, a control request) gets a
+  // definite answer instead of hanging.
+  for (const p of pending.values()) p.reject(new Error(`${p.method}: connection closed`));
+  pending.clear();
+};
 
 // Schema-valid denials per server->client request method (fail closed).
 // These should never fire with approvalPolicy "never", but if they do, deny.
@@ -337,28 +530,33 @@ const DENIALS: Record<string, object> = {
   applyPatchApproval: { decision: "abort" },
 };
 
-function handleServerRequest(msg: IncomingMessage): void {
-  progress("server-request-denied", { method: msg.method });
-  const denial = DENIALS[msg.method!];
+function handleServerRequest(id: string | number, method: string): void {
+  progress("server-request-denied", { method });
+  const denial = DENIALS[method];
   if (denial) {
-    send({ jsonrpc: "2.0", id: msg.id, result: denial });
+    send({ jsonrpc: "2.0", id, result: denial });
   } else {
     send({
       jsonrpc: "2.0",
-      id: msg.id,
+      id,
       error: { code: -32000, message: "denied by codex-cc-bridge (fail closed)" },
     });
   }
 }
 
 // Turn-scoped events can arrive in the same TCP chunk as the turn/start
-// response, i.e. before the awaited response assigns activeTurnId. Buffer them
+// response, i.e. before the awaited response assigns our turn id. Buffer them
 // until our turn is identified, then replay through the same handler.
-const earlyEvents: { method: string; params: NotificationParams }[] = [];
-function handleTurnEvent(method: string, params: NotificationParams): void {
+const earlyEvents: { method: string; params: unknown }[] = [];
+type Owned = { threadId: string; turnId: string };
+function handleTurnEvent(owned: Owned, method: string, params: unknown): void {
+  // Not on the thread we own (child threads spawned by subagents, unrelated threads on a
+  // shared server): not ours. Params that do not have the method's shape are not ours either.
+  const onOurThread = (p: { threadId: string }): boolean => p.threadId === owned.threadId;
   if (method === "item/completed") {
-    if (params.turnId !== undefined && params.turnId !== activeTurnId) return;
-    const item = params.item ?? {};
+    if (!isItemCompleted(params) || !onOurThread(params)) return;
+    if (params.turnId !== owned.turnId) return;
+    const item = params.item;
     if (item.type === "agentMessage") {
       if (item.phase === "final_answer") finalAnswer = item.text ?? "";
       else lastAgentMessage = item.text ?? "";
@@ -371,243 +569,369 @@ function handleTurnEvent(method: string, params: NotificationParams): void {
   } else if (method === "turn/completed") {
     // Only accept the completion of the turn we started; anything else
     // (concurrent drivers, child turns) is not ours.
-    if (params.turn?.id !== activeTurnId) return;
-    resolveTurn(params);
+    if (!isTurnEvent(params) || !onOurThread(params)) return;
+    if (params.turn.id !== owned.turnId) return;
+    turnDone.set(params);
+  } else if (method === "turn/started") {
+    // A turn on our thread that is not ours: a subagent turn (the one a review runs in, or
+    // one a plain turn spawned). Kept so interrupts reach it and the result can name it.
+    if (!isTurnEvent(params) || !onOurThread(params)) return;
+    const id = params.turn.id;
+    if (id !== owned.turnId) {
+      children.add(id);
+      firstChild.set(id);
+      progress("child", { turnId: id });
+      for (const e of deferredErrors.get(id) ?? []) handleOwnError(e);
+      deferredErrors.delete(id);
+    }
+  } else if (method === "error") {
+    if (!isErrorEvent(params) || !onOurThread(params)) return;
+    const t = params.turnId;
+    if (t === owned.turnId || children.has(t)) handleOwnError(params);
+    else deferredErrors.set(t, [...(deferredErrors.get(t) ?? []), params]);
   }
 }
-function turnIdentified(): void {
-  for (const e of earlyEvents) handleTurnEvent(e.method, e.params);
+/** An error notification that is known to be about our turn or one of its children. */
+function handleOwnError(params: Guarded<typeof isErrorEvent>): void {
+  progress("error", { detail: params });
+  // Codex cannot authenticate to OpenAI (auth.json unreadable under a read-restricted
+  // sandbox, or logged out): the server retries forever and the turn never completes
+  // (measured), so waiting is pointless.
+  if (isUnauthorized(params.error.codexErrorInfo)) {
+    abort(
+      "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
+        "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
+        "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
+      1,
+    );
+  }
+}
+function turnIdentified(owned: Owned): void {
+  turn.set(owned);
+  for (const e of earlyEvents) handleTurnEvent(owned, e.method, e.params);
   earlyEvents.length = 0;
 }
 
 ws.onmessage = (raw: MessageEvent) => {
-  const msg = JSON.parse(String(raw.data)) as IncomingMessage;
+  let frame: unknown;
+  try {
+    frame = JSON.parse(String(raw.data));
+  } catch {
+    // A throw here would be an uncaught exception: exit without interrupting the turn.
+    abort("app-server sent a frame that is not JSON; giving up on this connection", 1);
+    return;
+  }
+  if (!isIncomingMessage(frame)) {
+    progress("malformed-frame", { frame });
+    return;
+  }
+  const msg = frame;
   if (msg.id !== undefined && (msg.result !== undefined || msg.error !== undefined)) {
+    if (!isNumber(msg.id)) return; // our requests carry numeric ids
     const p = pending.get(msg.id);
     if (!p) return;
     pending.delete(msg.id);
     if (msg.error) p.reject(new Error(`${p.method}: ${JSON.stringify(msg.error)}`));
-    else p.resolve(msg.result);
+    else p.settle(msg.result);
     return;
   }
-  if (!msg.method) return;
+  if (msg.method === undefined) return;
   if (msg.id !== undefined) {
-    handleServerRequest(msg);
+    handleServerRequest(msg.id, msg.method);
     return;
   }
-  const params: NotificationParams = msg.params ?? {};
-  // Ignore all thread/turn-scoped events until our own thread is identified,
-  // and events for other threads afterwards (child threads spawned by
-  // subagents, unrelated threads on a shared server).
-  if (threadId === undefined) return;
-  if (params.threadId !== undefined && params.threadId !== threadId) return;
   switch (msg.method) {
     case "item/completed":
     case "turn/completed":
-      if (activeTurnId === null) earlyEvents.push({ method: msg.method, params });
-      else handleTurnEvent(msg.method, params);
+    case "turn/started":
+    case "error": {
+      // Turn-scoped events are filtered by thread and turn inside handleTurnEvent, which
+      // needs `turn` (our turn and the thread it lives on). Until that is known, buffer them
+      // unfiltered: the thread a review's child reports may only be known from the
+      // review/start response, which the child's turn/started can precede on the wire.
+      const owned = turn.value;
+      if (owned === undefined) earlyEvents.push({ method: msg.method, params: msg.params });
+      else handleTurnEvent(owned, msg.method, msg.params);
       break;
+    }
     case "thread/tokenUsage/updated":
-      usageInfo = params.tokenUsage ?? params ?? null;
-      break;
-    case "error":
-      progress("error", { detail: params });
+      if (
+        isTokenUsageEvent(msg.params) && threadId !== undefined &&
+        msg.params.threadId === threadId
+      ) {
+        usageInfo = msg.params.tokenUsage ?? msg.params;
+      }
       break;
     default:
       break;
   }
 };
 
-// Best effort: when CC cancels this task, interrupt the resident turn so the
-// app-server does not keep spending tokens / mutating files. If the turn/start
-// response has not arrived yet, wait briefly for the turn ID first.
-function onSignal(signal: string): void {
-  if (settled) process.exit(130);
-  settled = true;
-  const finish = (): never => {
-    console.error(`codex-turn: ${signal}: turn interrupted`);
-    process.exit(130);
-  };
-  const interrupt = (): void => {
-    request("turn/interrupt", { threadId, turnId: activeTurnId }).then(finish, finish);
-    setTimeout(finish, 3000);
-  };
-  if (threadId && activeTurnId) {
-    interrupt();
-  } else if (startRequested) {
-    const deadline = Date.now() + 3000;
-    const poll = setInterval(() => {
-      if (threadId && activeTurnId) {
-        clearInterval(poll);
-        interrupt();
-      } else if (Date.now() > deadline) {
-        clearInterval(poll);
-        finish();
-      }
-    }, 100);
-  } else {
-    finish();
-  }
-}
-process.on("SIGINT", () => onSignal("SIGINT"));
-process.on("SIGTERM", () => onSignal("SIGTERM"));
+process.on("SIGINT", () => abort("SIGINT: turn interrupted", 130));
+process.on("SIGTERM", () => abort("SIGTERM: turn interrupted", 130));
 
-await new Promise((resolve) => (ws.onopen = resolve));
+// --- The run: connect, prove containment, start the turn, wait for it ----------
+// Throwing anywhere here ends the run as "failed" unless the outcome was already decided
+// (an abort in flight), in which case the throw is simply late.
 
-await controlRequest("initialize", {
-  clientInfo: { name: "codex-cc-bridge", title: "codex-cc-bridge", version: "0.1.0" },
-  capabilities: {
-    optOutNotificationMethods: [
-      "item/agentMessage/delta",
-      "item/reasoning/summaryTextDelta",
-      "item/reasoning/summaryPartAdded",
-      "item/reasoning/textDelta",
-      "item/commandExecution/outputDelta",
-    ],
-  },
-}).catch((e: Error) => fail(String(e.message ?? e)));
-send({ jsonrpc: "2.0", method: "initialized", params: {} });
+async function run(): Promise<TurnEvent> {
+  await untilDecided(once(ws, "open", { signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) }))
+    .catch(() => fail(`no WebSocket handshake from ${url} within ${CONTROL_TIMEOUT_MS}ms`));
 
-// --- Containment preflight -------------------------------------------------
-// command/exec runs in the server's own context (no thread, no model, no
-// tokens). A server inside the Claude sandbox cannot write $HOME or /tmp
-// (only sandbox-designated subtrees like /tmp/claude*); a server inside *this*
-// session's sandbox can write the target cwd. Anything else means we are
-// talking to the wrong server: abort before starting any thread.
-{
-  const probeName = `.codex-cc-bridge-probe-${process.pid}-${Math.floor(Math.random() * 1e9)}`;
-  const probeWrite = (dir: string, label: string): string =>
-    `${label}=BLOCKED; if touch "${dir}/${probeName}" 2>/dev/null; then ${label}=WRITABLE; rm -f "${dir}/${probeName}"; fi; `;
-  const script = probeWrite("$HOME", "home") +
-    probeWrite("/tmp", "tmp") +
-    probeWrite(".", "cwdw") +
-    `echo "$home $tmp $cwdw"`;
-  const probe = await controlRequest<CommandExecResponse>(
-    "command/exec",
-    {
-      command: ["/bin/sh", "-c", script],
-      cwd,
-      // Without this, command/exec applies the user's configured codex sandbox,
-      // which dies on nested Seatbelt inside the Claude sandbox (exit 71).
-      sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
-      timeoutMs: PROBE_TIMEOUT_MS - 5000,
+  await controlRequest("initialize", {
+    clientInfo: { name: "codex-cc-bridge", title: "codex-cc-bridge", version: "0.1.0" },
+    capabilities: {
+      optOutNotificationMethods: [
+        "item/agentMessage/delta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/summaryPartAdded",
+        "item/reasoning/textDelta",
+        "item/commandExecution/outputDelta",
+      ],
     },
-    PROBE_TIMEOUT_MS,
-  ).catch((e: Error) =>
-    fail(`containment probe failed (refusing to run a turn): ${e.message ?? e}`)
-  );
-  if (probe.exitCode !== 0) {
-    fail(
-      `containment probe did not run cleanly (exit ${probe.exitCode}, stderr: ${
-        String(probe.stderr ?? "").trim()
-      }). Refusing to run a turn.`,
-    );
-  }
-  const [home, tmp, cwdw] = String(probe.stdout ?? "").trim().split(/\s+/);
-  if (home !== "BLOCKED" || tmp !== "BLOCKED") {
-    fail(
-      `REFUSING TO RUN: the app-server at ${url} can write ${
-        home !== "BLOCKED" ? "$HOME" : "/tmp"
-      }, ` +
-        "so it is NOT confined by the Claude sandbox.\n" +
-        "Kill it and restart it from a sandboxed (run_in_background) Bash: codex app-server --listen " +
-        url,
-    );
-  }
-  if (cwdw !== "WRITABLE") {
-    fail(
-      `REFUSING TO RUN: the app-server at ${url} cannot write ${cwd}.\n` +
-        "It is probably confined by a different session's sandbox. Start one for this session on another port.",
-    );
-  }
-  progress("containment", { home: "BLOCKED", tmp: "BLOCKED", cwd: "WRITABLE" });
-}
-// ---------------------------------------------------------------------------
+  }, isUnknown).catch((e: Error) => fail(e.message));
+  send({ jsonrpc: "2.0", method: "initialized", params: {} });
 
-let resolved: ThreadResponse | undefined;
-if (threadId) {
-  const r = await controlRequest<ThreadResponse>("thread/resume", {
-    threadId,
-    cwd,
-    sandbox: PINNED_THREAD_SANDBOX,
-    approvalPolicy: PINNED_APPROVAL_POLICY,
-    developerInstructions: DEVELOPER_INSTRUCTIONS,
-    ...(opts.model ? { model: opts.model } : {}),
-  }).catch((e: Error) => fail(String(e.message ?? e)));
-  threadId = r.thread?.id ?? threadId;
-  resolved = r;
-} else {
-  const r = await controlRequest<ThreadResponse>("thread/start", {
-    cwd,
-    sandbox: PINNED_THREAD_SANDBOX,
-    approvalPolicy: PINNED_APPROVAL_POLICY,
-    developerInstructions: DEVELOPER_INSTRUCTIONS,
-    ephemeral: false,
-    ...(opts.model ? { model: opts.model } : {}),
-  }).catch((e: Error) => fail(String(e.message ?? e)));
-  threadId = r.thread?.id;
-  resolved = r;
-}
-if (!threadId) fail("app-server returned no thread id");
-// Report what the server resolved, not what we asked for: the only in-band evidence of
-// which model the thread runs. Note the server echoes an unknown name back unchanged --
-// this proves the parameter was accepted, not that the model exists.
-progress("thread", {
-  threadId,
-  model: resolved?.model ?? null,
-  effort: resolved?.reasoningEffort ?? null,
-});
-
-startRequested = true;
-if (reviewTarget) {
-  const r = await controlRequest<ReviewStartResponse>("review/start", {
-    threadId,
-    target: reviewTarget,
-    delivery: "inline",
-  }).catch((e: Error) => fail(String(e.message ?? e)));
-  if (!r.turn?.id) fail("app-server returned no turn id for review/start");
-  activeTurnId = r.turn.id;
-  if (r.reviewThreadId) threadId = r.reviewThreadId;
-} else {
-  const params: Record<string, unknown> = {
-    threadId,
-    input: [{ type: "text", text: prompt }],
-    sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
-    approvalPolicy: PINNED_APPROVAL_POLICY,
-  };
-  if (outputSchema !== undefined) params.outputSchema = outputSchema;
-  if (opts.model) params.model = opts.model;
-  if (opts.effort) params.effort = opts.effort;
-  const r = await controlRequest<TurnStartResponse>("turn/start", params).catch((e: Error) =>
-    fail(String(e.message ?? e))
-  );
-  if (!r.turn?.id) fail("app-server returned no turn id for turn/start");
-  activeTurnId = r.turn.id;
-}
-turnIdentified();
-
-const completed = await turnDone;
-settled = true;
-const turn: Turn = completed.turn ?? {};
-let finalMessage: string | null = finalAnswer ?? lastAgentMessage;
-if (finalMessage === null) {
-  const items = (turn.items ?? []).filter((i) => i.type === "agentMessage");
-  const final = items.find((i) => i.phase === "final_answer") ?? items[items.length - 1];
-  if (final) finalMessage = final.text ?? "";
-}
-console.log(
-  JSON.stringify(
-    {
+  // --- Containment preflight -------------------------------------------------
+  // command/exec runs in the server's own context (no thread, no model, no
+  // tokens). A server inside the Claude sandbox cannot write $HOME or /tmp
+  // (only sandbox-designated subtrees like /tmp/claude*); a server inside *this*
+  // session's sandbox can write the target cwd. Anything else means we are
+  // talking to the wrong server: abort before starting any thread.
+  {
+    const probeName = `.codex-cc-bridge-probe-${process.pid}-${Math.floor(Math.random() * 1e9)}`;
+    const probeWrite = (dir: string, label: string): string =>
+      `${label}=BLOCKED; if touch "${dir}/${probeName}" 2>/dev/null; then ${label}=WRITABLE; rm -f "${dir}/${probeName}"; fi; `;
+    const script = probeWrite("$HOME", "home") +
+      probeWrite("/tmp", "tmp") +
+      probeWrite(".", "cwdw") +
+      `echo "$home $tmp $cwdw"`;
+    const probe = await controlRequest(
+      "command/exec",
+      {
+        command: ["/bin/sh", "-c", script],
+        cwd,
+        // Without this, command/exec applies the user's configured codex sandbox,
+        // which dies on nested Seatbelt inside the Claude sandbox (exit 71).
+        sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
+        timeoutMs: PROBE_TIMEOUT_MS - 5000,
+      },
+      isCommandExecResponse,
+      PROBE_TIMEOUT_MS,
+    ).catch((e: Error) => fail(`containment probe failed (refusing to run a turn): ${e.message}`));
+    if (probe.exitCode !== 0) {
+      fail(
+        `containment probe did not run cleanly (exit ${probe.exitCode}, stderr: ${probe.stderr.trim()}). Refusing to run a turn.`,
+      );
+    }
+    const fields = probe.stdout.trim().split(/\s+/);
+    // Three known words or nothing: anything else is a broken probe, not a verdict.
+    if (fields.length !== 3 || !fields.every((f) => f === "BLOCKED" || f === "WRITABLE")) {
+      fail(
+        `containment probe output not understood (stdout: ${JSON.stringify(probe.stdout)}, ` +
+          `stderr: ${JSON.stringify(probe.stderr)}). Refusing to run a turn.`,
+      );
+    }
+    const [home, tmp, cwdw] = fields;
+    if (home !== "BLOCKED" || tmp !== "BLOCKED") {
+      fail(
+        `REFUSING TO RUN: the app-server at ${url} can write ${
+          home !== "BLOCKED" ? "$HOME" : "/tmp"
+        }, ` +
+          "so it is NOT confined by the Claude sandbox.\n" +
+          "Kill it and restart it from a sandboxed (run_in_background) Bash: codex app-server --listen " +
+          url,
+      );
+    }
+    if (cwdw !== "WRITABLE") {
+      fail(
+        `REFUSING TO RUN: the app-server at ${url} cannot write ${cwd}.\n` +
+          "It is probably confined by a different session's sandbox. Start one for this session on another port.",
+      );
+    }
+    progress("containment", { home: "BLOCKED", tmp: "BLOCKED", cwd: "WRITABLE" });
+  }
+  // ---------------------------------------------------------------------------
+  let resolved: Guarded<typeof isThreadResponse>;
+  if (threadId) {
+    const r = await controlRequest("thread/resume", {
       threadId,
-      turnStatus: turn.status ?? null,
-      turnError: turn.error ?? null,
-      finalMessage,
-      tokenUsage: usageInfo,
-    },
-    null,
-    2,
-  ),
-);
-// Let stdout drain; do not process.exit() on the success path.
-process.exitCode = turn.status === "completed" ? 0 : 1;
-ws.close();
+      cwd,
+      sandbox: PINNED_THREAD_SANDBOX,
+      approvalPolicy: PINNED_APPROVAL_POLICY,
+      developerInstructions: DEVELOPER_INSTRUCTIONS,
+      ...(opts.model ? { model: opts.model } : {}),
+    }, isThreadResponse).catch((e: Error) => {
+      // Another client holds the thread open: measured cause is the ChatGPT app's remote
+      // control resuming bridge threads on its own app-server (canon:
+      // facts/codex/thread-resume-blocked-by-other-writer-client). Nothing here can
+      // release it; say so instead of leaving a bare -32600.
+      if (e.message.includes("already has an active writer")) {
+        fail(
+          `thread ${threadId} is held open by another codex client (typically the ChatGPT app's ` +
+            "remote control, which can resume non-ephemeral threads). Close it there, or drop " +
+            `--thread and start a new thread.\n(${e.message})`,
+        );
+      }
+      fail(e.message);
+    });
+    threadId = r.thread.id;
+    resolved = r;
+  } else {
+    const r = await controlRequest("thread/start", {
+      cwd,
+      sandbox: PINNED_THREAD_SANDBOX,
+      approvalPolicy: PINNED_APPROVAL_POLICY,
+      developerInstructions: DEVELOPER_INSTRUCTIONS,
+      ephemeral: false,
+      ...(opts.model ? { model: opts.model } : {}),
+    }, isThreadResponse).catch((e: Error) => fail(e.message));
+    threadId = r.thread.id;
+    resolved = r;
+  }
+  // Report what the server resolved, not what we asked for: the only in-band evidence of
+  // which model the thread runs. Note the server echoes an unknown name back unchanged --
+  // this proves the parameter was accepted, not that the model exists.
+  progress("thread", {
+    threadId,
+    model: resolved.model,
+    effort: resolved.reasoningEffort ?? null,
+  });
+
+  if (reviewTarget) {
+    const r = await boundedRequest("review/start", {
+      threadId,
+      target: reviewTarget,
+      delivery: "inline",
+    }, isReviewStartResponse).catch((e: Error) => fail(e.message));
+    // With delivery "inline" the review runs on the thread we started, and every event
+    // arrives on that threadId (measured; "detached" is rejected for thread/start threads).
+    // Events for any other thread are filtered out before the early-event buffer sees them,
+    // so a review moved elsewhere could only be waited on forever. The server has already
+    // accepted it, though, so record where it went and abort (= interrupt it there).
+    turnIdentified({ threadId: r.reviewThreadId ?? threadId, turnId: r.turn.id });
+    if (r.reviewThreadId !== undefined && r.reviewThreadId !== threadId) {
+      abort(
+        `review/start moved the review to thread ${r.reviewThreadId}; this driver only follows ` +
+          "inline reviews on its own thread, so the review is being interrupted",
+        1,
+      );
+      return new Promise<never>(() => {});
+    }
+  } else {
+    const params: Record<string, unknown> = {
+      threadId,
+      input: [{ type: "text", text: prompt }],
+      sandboxPolicy: PINNED_TURN_SANDBOX_POLICY,
+      approvalPolicy: PINNED_APPROVAL_POLICY,
+    };
+    if (outputSchema !== undefined) params.outputSchema = outputSchema;
+    if (opts.model) params.model = opts.model;
+    if (opts.effort) params.effort = opts.effort;
+    const r = await boundedRequest("turn/start", params, isTurnStartResponse).catch((e: Error) =>
+      fail(e.message)
+    );
+    turnIdentified({ threadId, turnId: r.turn.id });
+  }
+  return await turnDone.promise;
+}
+
+// --- Ending -------------------------------------------------------------------
+
+/** Interrupt what we own, children first (interrupting the parent alone does not reach
+ * them, measured). Each wait ends when the grammar says the value is decided, not on a
+ * guess: `turn` once run() has ended (a decided outcome cuts preflight short, so this is
+ * prompt unless a start request is in flight, which gets a short deadline of its own); a
+ * review's child once it announces itself or our turn is over — plus a short bound, since
+ * a child that is coming does so right after the start response. A plain turn's children
+ * are not waited for (they may never exist), only used when already known. Throws when the
+ * interrupt could not be confirmed. */
+async function interruptOwned(): Promise<void> {
+  // A start request that is still unanswered decides `turn` on its own (30 s) timeout; a
+  // cancel must not look stuck for that long, so give the decision a short deadline and
+  // otherwise report that the turn may have started.
+  await withTimeout(
+    Promise.race([turn.promise, runSettled.promise]),
+    3000,
+    "waiting for the turn/start response to know what to interrupt",
+  );
+  const ours = turn.value;
+  if (ours === undefined) throw new Error("no turn was started, so there is nothing to interrupt");
+  if (reviewMode !== undefined && children.size === 0) {
+    await Promise.race([
+      firstChild.promise,
+      turnDone.promise,
+      sleep(3000, undefined, { ref: false }),
+    ]);
+  }
+  const targets = [...children, ours.turnId];
+  await withTimeout(
+    Promise.all(
+      targets.map((turnId) =>
+        request("turn/interrupt", { threadId: ours.threadId, turnId }, isUnknown)
+      ),
+    ),
+    3000,
+    "turn/interrupt",
+  );
+}
+
+run()
+  .then(
+    (params) => outcome.resolve({ kind: "completed", params }),
+    (e: unknown) => outcome.resolve({ kind: "failed", message: errorMessage(e) }),
+  )
+  .finally(() => runSettled.set(true));
+const result = await outcome.promise;
+switch (result.kind) {
+  case "failed":
+    console.error(`codex-turn: ${result.message}`);
+    process.exit(1);
+    break;
+  case "aborted":
+    // Reason first, so nothing that happens during the interrupt can swallow it.
+    console.error(`codex-turn: ${result.reason}`);
+    await interruptOwned().catch((e: unknown) =>
+      console.error(
+        `codex-turn: turn/interrupt was not acknowledged (${
+          errorMessage(e)
+        }); the server turn may still be running`,
+      )
+    );
+    process.exit(result.code);
+    break;
+  case "completed": {
+    const t = result.params.turn;
+    let finalMessage: string | null = finalAnswer ?? lastAgentMessage;
+    if (finalMessage === null) {
+      const items = t.items.filter((i) => i.type === "agentMessage");
+      const final = items.find((i) => i.phase === "final_answer") ?? items[items.length - 1];
+      if (final) finalMessage = final.text ?? "";
+    }
+    console.log(
+      JSON.stringify(
+        {
+          threadId,
+          // The turn id lets `codex-bridge.mts turn-context <thread> <turn>` pick this turn's
+          // server-side record out of a resumed thread's many.
+          turnId: turn.value?.turnId,
+          // The first subagent turn announced on our thread: for a review that is where the
+          // turn_context lives, so it is the id to give `turn-context` (null if none).
+          reviewTurnId: firstChild.value ?? null,
+          childTurnIds: [...children],
+          turnStatus: t.status,
+          turnError: t.error ?? null,
+          finalMessage,
+          tokenUsage: usageInfo,
+        },
+        null,
+        2,
+      ),
+    );
+    // Let stdout drain; do not process.exit() on the success path. Late triggers (a signal,
+    // a straggling 401) are no-ops now that the outcome is decided.
+    process.exitCode = t.status === "completed" ? 0 : 1;
+    ws.close();
+    break;
+  }
+}

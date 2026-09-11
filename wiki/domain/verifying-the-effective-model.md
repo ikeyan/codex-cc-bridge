@@ -43,7 +43,19 @@ codex は thread ごとの記録を `~/.codex/sessions/<年>/<月>/<日>/rollout
 1. turn が `completed` で終わっていること — 実在しないモデルなら API 呼び出しの側で落ちる。
 2. その turn の `turn_context.model` が指定どおりであること。
 
-ファイルは threadId で grep すれば見つかる (`grep -rl <threadId> ~/.codex/sessions`)。
+取り出しは `scripts/codex-bridge.mts turn-context <threadId> [<turnId>]` がやる。rollout の
+ファイル名に入る UUID は threadId と一致するとは限らない (canon) ので、先頭レコード
+`session_meta.payload.id` で構造的に照合し、複数一致は推測せずエラーにする。driver は結果 JSON に
+`turnId` を載せるので、resume で turn が複数ある thread でもその turn の記録だけを引ける。
+
+**review の記録は子 thread にある。**`review/start` はレビューを subagent の子 thread で走らせ、
+`turn_context` はその子 rollout (`session_meta.parent_thread_id` が親) にしか書かれない。だから
+`turn-context` は親に加えて `parent_thread_id` で子を集め、`children` として返す。review で
+確かめるべき `model` / `sandbox_policy` は `children[].turnContexts` の方を見る
+(canon: `facts/codex/review-start-inline-same-thread`)。driver が返す `turnId` は親 turn の id で、
+子 turn の id とは別物 (レビュー中に親 threadId で届く別 turnId の `turn/started` がそれ)。
+driver はその子 turn の id を結果 JSON の `reviewTurnId` に載せるので、review の記録を turn で
+絞るときはそれを `turn-context` に渡す (`turnId` を渡すと子の記録は一致せず空になる)。
 
 ## ついでに得られるもの
 
