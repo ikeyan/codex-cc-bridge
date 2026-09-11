@@ -98,15 +98,21 @@ export const isLiteral =
     value === literal;
 export const isReadonlyArray = (value: unknown): value is readonly unknown[] =>
   Array.isArray(value);
-export const isReadonlyArrayOf =
-  <T,>(guard: (value: unknown) => value is T) => (value: unknown): value is readonly T[] =>
-    isReadonlyArray(value) && value.every((item) => guard(item));
-export const isUndefinedableOf =
-  <T,>(guard: (value: unknown) => value is T) => (value: unknown): value is T | undefined =>
-    value === undefined || guard(value);
-export const isNullableOf =
-  <T,>(guard: (value: unknown) => value is T) => (value: unknown): value is T | null =>
-    value === null || guard(value);
+export const isReadonlyArrayOf: <T>(
+  guard: (value: unknown) => value is T,
+) => (value: unknown) => value is readonly T[] = (guard) => (value) =>
+  isReadonlyArray(value) && value.every((item) => guard(item));
+export const isUndefinedableOf: <T>(
+  guard: (value: unknown) => value is T,
+) => (value: unknown) => value is T | undefined = (guard) => (value) =>
+  value === undefined || guard(value);
+export const isNullableOf: <T>(
+  guard: (value: unknown) => value is T,
+) => (value: unknown) => value is T | null = (guard) => (value) => value === null || guard(value);
+export const isNullishOf: <T>(
+  guard: (value: unknown) => value is T,
+) => (value: unknown) => value is T | null | undefined = (guard) => (value) =>
+  value == null || guard(value);
 const sizeGetterOfMap: (() => unknown) | undefined = Object.getOwnPropertyDescriptor(
   Map.prototype,
   "size",
@@ -157,15 +163,13 @@ export type EnsureLiteralArray<T extends readonly Primitive[]> = {
 };
 export const isOneOf: {
   <T extends readonly Primitive[]>(
-    value: unknown,
     options: EnsureLiteralArray<T>,
-  ): value is T[number];
+  ): (value: unknown) => value is T[number];
 } = <T extends readonly Primitive[]>(
-  value: unknown,
   options: EnsureLiteralArray<T>,
-): value is T[number] => {
+) => {
   const widenedOptions = options as readonly unknown[];
-  return widenedOptions.includes(value);
+  return (value: unknown): value is T[number] => widenedOptions.includes(value);
 };
 
 let isErrorImpl: ((e: unknown) => boolean) | undefined;
@@ -173,6 +177,7 @@ export const isError = (e: unknown): e is Error => {
   if (isErrorImpl === undefined) {
     if (
       "isError" in Error && typeof Error.isError === "function" &&
+      // Safari returns false here. see https://webkit.org/b/292727
       Error.isError(new DOMException()) === true
     ) {
       isErrorImpl = Error.isError as (e: unknown) => boolean;

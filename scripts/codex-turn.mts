@@ -33,7 +33,7 @@ import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import {
-  isNullableOf,
+  isNullishOf,
   isNumber,
   isObjectOf,
   isOneOf,
@@ -59,8 +59,8 @@ const isUnknown = (_: unknown): _ is unknown => true;
 /** The server serializes an absent `Option` as `null` (measured), so "optional" on the wire
  * means absent, undefined or null. */
 const optString = isUndefinedableOf(isString);
-const optNullString = isUndefinedableOf(isNullableOf(isString));
-const optNullNumber = isUndefinedableOf(isNullableOf(isNumber));
+const optNullString = isNullishOf(isString);
+const optNullNumber = isNullishOf(isNumber);
 /** The message of anything thrown. Checks for the property rather than for Error-ness:
  * a DOMException is not an Error on every runtime (bun), but it carries a message. */
 const hasMessage = isObjectOf({ message: isString });
@@ -113,7 +113,7 @@ const isErrorEvent = isObjectOf({
   willRetry: anyValue,
   error: isObjectOf({
     message: isString,
-    codexErrorInfo: isUndefinedableOf(isNullableOf(isCodexErrorInfo)),
+    codexErrorInfo: isNullishOf(isCodexErrorInfo),
   }),
 });
 /** The server cannot authenticate to OpenAI: either the bare code or a 401 on any stage. */
@@ -223,9 +223,7 @@ const url = `ws://127.0.0.1:${port}`;
 // may legally contain `$(...)` or a single quote (measured), so no quoting discipline in
 // the agent's command line is safe; a file written by the Write tool, or stdin, is.
 const REVIEW_MODES = ["uncommitted", "base", "commit", "custom"] as const;
-const reviewMode = opts.review === undefined
-  ? undefined
-  : isOneOf(opts.review, REVIEW_MODES)
+const reviewMode = isUndefinedableOf(isOneOf(REVIEW_MODES))(opts.review)
   ? opts.review
   : usage(`--review must be one of ${REVIEW_MODES.join("|")}, got ${JSON.stringify(opts.review)}`);
 // review/start itself carries only {threadId, target, delivery}, so an outputSchema and
@@ -483,6 +481,10 @@ const runSettled = new Once<true>();
 const turn = new Once<{ threadId: string; turnId: string }>();
 const children = new Set<string>();
 const anyChild = new Once<true>();
+/** Errors naming a turn we do not (yet) know. A review's child can emit its 401 before its
+ * turn/started; an earlier turn of a resumed thread can emit a late one. Only a turn/started
+ * for that id decides which, so hold them until then. */
+const deferredErrors = new Map<string, Guarded<typeof isErrorEvent>[]>();
 const turnDone = new Once<TurnEvent>();
 
 let finalAnswer: string | null = null;
@@ -573,30 +575,33 @@ function handleTurnEvent(owned: Owned, method: string, params: unknown): void {
     // A turn on our thread that is not ours: a subagent turn (the one a review runs in, or
     // one a plain turn spawned). Kept so interrupts reach it and the result can name it.
     if (!isTurnEvent(params) || !onOurThread(params)) return;
-    if (params.turn.id !== owned.turnId) {
-      children.add(params.turn.id);
+    const id = params.turn.id;
+    if (id !== owned.turnId) {
+      children.add(id);
       anyChild.set(true);
+      for (const e of deferredErrors.get(id) ?? []) handleOwnError(e);
+      deferredErrors.delete(id);
     }
   } else if (method === "error") {
     if (!isErrorEvent(params) || !onOurThread(params)) return;
-    // Ours if it names our turn or a child. A review's child may not be identified yet, so
-    // accept unknown turn ids in that window.
     const t = params.turnId;
-    const mine = t === owned.turnId || children.has(t) ||
-      (reviewMode !== undefined && children.size === 0);
-    if (!mine) return;
-    progress("error", { detail: params });
-    // Codex cannot authenticate to OpenAI (auth.json unreadable under a read-restricted
-    // sandbox, or logged out): the server retries forever and the turn never completes
-    // (measured), so waiting is pointless.
-    if (isUnauthorized(params.error.codexErrorInfo)) {
-      abort(
-        "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
-          "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
-          "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
-        1,
-      );
-    }
+    if (t === owned.turnId || children.has(t)) handleOwnError(params);
+    else deferredErrors.set(t, [...(deferredErrors.get(t) ?? []), params]);
+  }
+}
+/** An error notification that is known to be about our turn or one of its children. */
+function handleOwnError(params: Guarded<typeof isErrorEvent>): void {
+  progress("error", { detail: params });
+  // Codex cannot authenticate to OpenAI (auth.json unreadable under a read-restricted
+  // sandbox, or logged out): the server retries forever and the turn never completes
+  // (measured), so waiting is pointless.
+  if (isUnauthorized(params.error.codexErrorInfo)) {
+    abort(
+      "codex got 401 Unauthorized from OpenAI: the app-server cannot use its credentials. " +
+        "Check `codex login status` from a sandboxed Bash — if it says Operation not permitted, " +
+        "the sandbox denies reading ~/.codex/auth.json (allowRead it); otherwise run `codex login`.",
+      1,
+    );
   }
 }
 function turnIdentified(owned: Owned): void {

@@ -76,8 +76,10 @@ stdout に流しかけの結果 JSON が切れる。
 driver が自 thread について受け取る列を記号にすると (`S` = start 応答 = 自 turn id、`C` = 子の
 `turn/started`、`I` = `item/completed`、`E` = `error`、`D` = `turn/completed`):
 
-- 通常 turn: `S C? (I | E)* D` — `C` は codex が subagent を使ったときだけ現れる (来るとは限らないので待たない。来ていれば interrupt の対象にはする)
-- review: `S C (I | E)* D` — ただし `C` は `S` と同じ TCP チャンクで届きうるので、線上では
+- 通常 turn: `S (C | I | E)* D` — `C` は codex が subagent を使うたびに現れ、何個でも、`I`/`E` の間に
+  割り込んで来る (来るとは限らないので待たない。来ていれば全部 interrupt の対象にする)
+- review: `S C (C | I | E)* D` — 最初の `C` がレビュー本体の子 turn。ただしその `C` は `S` と同じ TCP
+  チャンクで届きうるので、線上では
   `C S ...` の順に見えることがある (`earlyEvents` に溜めて `S` の後に replay する理由)。
   実測では `C` は `S` の直後に来る。
 
@@ -86,7 +88,8 @@ driver が自 thread について受け取る列を記号にすると (`S` = sta
 | 値 | 決まる時点 | 来ないと確定する条件 |
 | --- | --- | --- |
 | `turn` (自 turn と thread) | `S` | `run()` が終わったのに `turn` が空。start 要求を**送る前**の await (接続・プローブ・thread) は `outcome` が決まった時点で打ち切られるので、preflight 中の中断は即座に確定し、thread や turn を作ってから interrupt する無駄が無い。start 要求を**送った後**は server が受理しているかもしれないので、その応答か timeout まで待ってから確定する |
-| `child` (子 turn) | `C` | review: 自 turn が終わった (`turnDone`)。それ以外は文法上「`S` の直後」なので短い上限で打ち切る (唯一の時間仮定)。通常 turn: 待たない (来ていれば使う) |
+| `children` (子 turn の集合) | 各 `C` | review の最初の 1 つ: 自 turn が終わった (`turnDone`)。それ以外は文法上「`S` の直後」なので短い上限で打ち切る (唯一の時間仮定)。それ以降の `C` と通常 turn の `C`: 待たない (来ていれば全部使う) |
+| `E` のうち turn id が未知のもの | その id の `C` が来た時点で「自分の子」と決まる | 来なければ最後まで未知 = 他人のもの (resume した thread の前の turn など)。それまで保留し、決して先取りで自分のものにしない |
 | `turnDone` | `D` | `outcome` が中断/失敗に決まった (以後は待たない) |
 | `outcome` | `D` / SIGTERM / 401 / ws 切断 / 不正 frame / `reviewThreadId` 不一致 / `run()` の例外 | 必ず決まる |
 

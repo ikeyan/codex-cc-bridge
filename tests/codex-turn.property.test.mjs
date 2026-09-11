@@ -1,6 +1,7 @@
 // Property-based check of the driver's event demultiplexing and abort logic: random event
 // sequences generated from the grammar in wiki/architecture/turn-event-demultiplexing.md
-// (own turn: `S (I|E)* D`; review: `S C (I|E)* D`, where C may precede S on the wire), mixed
+// (own turn: `S (C|I|E)* D`; review: `S C (C|I|E)* D`, where the first C may precede S on the
+// wire), mixed
 // with noise from other threads/turns, with one trigger (SIGTERM or 401) at a random
 // position. The invariants below are what the example-based tests pin one cell at a time.
 //
@@ -28,6 +29,7 @@ const CHILD_TURN = "child-turn";
 const eventArb = fc.constantFrom(
   "I", // item/completed for our turn (an agent message)
   "E", // a non-401 error for our turn
+  "C", // another subagent turn announced on our thread (turn/started with a fresh id)
   "noise:other-thread-item",
   "noise:other-thread-completed",
   "noise:own-thread-other-turn-item",
@@ -46,8 +48,14 @@ const scenarioArb = fc.record({
   }),
 });
 
+const childId = (i) => `child-${i}`;
 function eventMessage(kind, i) {
   switch (kind) {
+    case "C":
+      return {
+        method: "turn/started",
+        params: { threadId: OWN_THREAD, turn: { id: childId(i), status: "inProgress", items: [] } },
+      };
     case "I":
       return {
         method: "item/completed",
@@ -180,7 +188,7 @@ async function play(scenario) {
   const elapsed = Date.now() - t0;
   server.close();
   const interrupts = recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params);
-  return { ...r, elapsed, interrupts };
+  return { ...r, elapsed, interrupts, stream };
 }
 
 const count = (text, re) => (text.match(re) ?? []).length;
@@ -193,6 +201,7 @@ test(
       fc.asyncProperty(scenarioArb, async (scenario) => {
         const { review, trigger } = scenario;
         const r = await play(scenario);
+        const { stream } = r;
         const ctx = JSON.stringify({ scenario, code: r.code, stderr: r.stderr, stdout: r.stdout });
 
         // (a) Exactly one ending, reported once.
@@ -207,20 +216,44 @@ test(
 
         // (b) Exit code and interrupt targets follow the trigger; the review child, which the
         // grammar says always announces itself, is interrupted first.
-        const own = { threadId: OWN_THREAD, turnId: OWN_TURN };
-        const kid = { threadId: OWN_THREAD, turnId: CHILD_TURN };
+        // Children the grammar makes the driver aware of: the review child always (it is
+        // waited for), plus every C sent before the trigger. C's sent after the trigger may
+        // or may not be seen before the interrupt goes out; they are allowed, not required.
+        const bodyChildren = scenario.body
+          .map((k, i) => (k === "C" ? childId(i) : null))
+          .filter((id) => id !== null);
+        const reviewChild = review ? [CHILD_TURN] : [];
+        const at = Math.min(trigger.pos, stream.length);
+        const streamChildren = stream
+          .map((m, i) =>
+            m.method === "turn/started" && m.params.threadId === OWN_THREAD
+              ? { id: m.params.turn.id, i }
+              : null
+          )
+          .filter((x) => x !== null);
+        const seenBefore = streamChildren.filter((x) => x.i < at).map((x) => x.id);
+        const required = new Set([...reviewChild, ...seenBefore]);
+        const allowed = new Set([...reviewChild, ...bodyChildren]);
         if (trigger.kind === "none") {
           assert.equal(r.code, 0, ctx);
           assert.deepEqual(r.interrupts, [], ctx);
           const out = JSON.parse(r.stdout);
           assert.equal(out.threadId, OWN_THREAD, ctx);
           assert.equal(out.turnId, OWN_TURN, ctx);
-          assert.equal(out.reviewTurnId, review ? CHILD_TURN : null, ctx);
+          assert.equal(out.reviewTurnId, [...reviewChild, ...bodyChildren][0] ?? null, ctx);
+          assert.deepEqual(out.childTurnIds, [...reviewChild, ...bodyChildren], ctx);
           assert.equal(out.turnStatus, "completed", ctx);
           assert.doesNotMatch(String(out.finalMessage), /WRONG/, ctx);
         } else {
           assert.equal(r.code, trigger.kind === "sigterm" ? 130 : 1, ctx);
-          assert.deepEqual(r.interrupts, review ? [kid, own] : [own], ctx);
+          const targets = r.interrupts.map((p) => p.turnId);
+          assert.equal(targets.at(-1), OWN_TURN, `own turn is interrupted last\n${ctx}`);
+          assert.equal(new Set(targets).size, targets.length, `no duplicate interrupts\n${ctx}`);
+          for (const id of required) assert.ok(targets.includes(id), `missing ${id}\n${ctx}`);
+          for (const id of targets.slice(0, -1)) {
+            assert.ok(allowed.has(id), `unexpected ${id}\n${ctx}`);
+          }
+          for (const p of r.interrupts) assert.equal(p.threadId, OWN_THREAD, ctx);
           assert.doesNotMatch(r.stderr, /not acknowledged/, ctx);
           assert.equal(r.stdout, "", `no result JSON on an abort\n${ctx}`);
         }

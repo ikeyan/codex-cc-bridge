@@ -1477,6 +1477,57 @@ test("SIGTERM while turn/start is unanswered gives the response a short deadline
   assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
 });
 
+test("a 401 for an unknown turn during a review is held, not taken as the child's", async () => {
+  // A resumed thread's earlier turn can emit a late 401 while our review's child is not yet
+  // announced. That id never gets a turn/started, so it is never ours: the review completes.
+  const recorded = [];
+  const server = await startMockServer(
+    appServerBehaviour(recorded, {
+      beforeTurnStartResponse: (send) =>
+        send({
+          jsonrpc: "2.0",
+          method: "error",
+          params: {
+            threadId: "thread-1",
+            turnId: "earlier-turn",
+            willRetry: true,
+            error: { message: "Unauthorized", codexErrorInfo: "unauthorized" },
+          },
+        }),
+      onTurnStart: (send) => {
+        send({
+          jsonrpc: "2.0",
+          method: "turn/started",
+          params: {
+            threadId: "thread-1",
+            turn: { id: "child-turn", status: "inProgress", items: [] },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "item/completed",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item: { type: "agentMessage", text: "REVIEW OK", phase: "final_answer" },
+          },
+        });
+        send({
+          jsonrpc: "2.0",
+          method: "turn/completed",
+          params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
+        });
+      },
+    }),
+  );
+  const r = await runDriver(["--cwd", "/tmp", "--review", "uncommitted"], { port: server.port });
+  server.close();
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).finalMessage, "REVIEW OK");
+  assert.equal(findRequest(recorded, "turn/interrupt"), undefined);
+  assert.doesNotMatch(r.stderr, /401 Unauthorized/);
+});
+
 test("a 401 from OpenAI mid-turn interrupts and fails instead of waiting forever", async () => {
   const recorded = [];
   const server = await startMockServer(
