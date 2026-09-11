@@ -473,14 +473,15 @@ function untilDecided<T>(p: Promise<T>): Promise<T> {
  * runs on (normally ours; a review the server moved elsewhere is still ours to interrupt).
  * `children` are the subagent turns announced on our thread (turn/started with another
  * id): the one a review runs in, or any a plain turn spawns. Interrupting only the parent
- * does not stop them (measured), so all of them are interrupt targets; `anyChild` lets a
- * review wait for its first. `runSettled` is run() having ended, by success or throw: after
+ * does not stop them (measured), so all of them are interrupt targets; `firstChild` lets a
+ * review wait for its own. `runSettled` is run() having ended, by success or throw: after
  * it, `turn` is either set or never will be. */
 let threadId: string | undefined = opts.thread;
 const runSettled = new Once<true>();
 const turn = new Once<{ threadId: string; turnId: string }>();
 const children = new Set<string>();
-const anyChild = new Once<true>();
+/** The first child, awaitable: a review waits for it (it is where the review runs). */
+const firstChild = new Once<string>();
 /** Errors naming a turn we do not (yet) know. A review's child can emit its 401 before its
  * turn/started; an earlier turn of a resumed thread can emit a late one. Only a turn/started
  * for that id decides which, so hold them until then. */
@@ -578,7 +579,8 @@ function handleTurnEvent(owned: Owned, method: string, params: unknown): void {
     const id = params.turn.id;
     if (id !== owned.turnId) {
       children.add(id);
-      anyChild.set(true);
+      firstChild.set(id);
+      progress("child", { turnId: id });
       for (const e of deferredErrors.get(id) ?? []) handleOwnError(e);
       deferredErrors.delete(id);
     }
@@ -857,7 +859,7 @@ async function interruptOwned(): Promise<void> {
   if (ours === undefined) throw new Error("no turn was started, so there is nothing to interrupt");
   if (reviewMode !== undefined && children.size === 0) {
     await Promise.race([
-      anyChild.promise,
+      firstChild.promise,
       turnDone.promise,
       sleep(3000, undefined, { ref: false }),
     ]);
@@ -906,7 +908,6 @@ switch (result.kind) {
       const final = items.find((i) => i.phase === "final_answer") ?? items[items.length - 1];
       if (final) finalMessage = final.text ?? "";
     }
-    const [firstChild] = children;
     console.log(
       JSON.stringify(
         {
@@ -916,7 +917,7 @@ switch (result.kind) {
           turnId: turn.value?.turnId,
           // The first subagent turn announced on our thread: for a review that is where the
           // turn_context lives, so it is the id to give `turn-context` (null if none).
-          reviewTurnId: firstChild ?? null,
+          reviewTurnId: firstChild.value ?? null,
           childTurnIds: [...children],
           turnStatus: t.status,
           turnError: t.error ?? null,

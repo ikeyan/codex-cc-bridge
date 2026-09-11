@@ -30,6 +30,7 @@ const eventArb = fc.constantFrom(
   "I", // item/completed for our turn (an agent message)
   "E", // a non-401 error for our turn
   "C", // another subagent turn announced on our thread (turn/started with a fresh id)
+  "noise:unknown-turn-401", // a 401 naming a turn we never learn of: must be held, never ours
   "noise:other-thread-item",
   "noise:other-thread-completed",
   "noise:own-thread-other-turn-item",
@@ -101,6 +102,16 @@ function eventMessage(kind, i) {
           threadId: OWN_THREAD,
           turnId: "other-turn",
           item: { type: "agentMessage", text: "WRONG2", phase: "final_answer" },
+        },
+      };
+    case "noise:unknown-turn-401":
+      return {
+        method: "error",
+        params: {
+          threadId: OWN_THREAD,
+          turnId: `stranger-${i}`,
+          willRetry: true,
+          error: { message: "Unauthorized", codexErrorInfo: "unauthorized" },
         },
       };
     case "noise:other-thread-started":
@@ -188,7 +199,14 @@ async function play(scenario) {
   const elapsed = Date.now() - t0;
   server.close();
   const interrupts = recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params);
-  return { ...r, elapsed, interrupts, stream };
+  // Children the driver demonstrably saw before it decided to abort: its own progress lines.
+  const abortLine = r.stderr.search(/codex-turn: (SIGTERM: turn interrupted|codex got 401)/);
+  const seenBeforeAbort = [
+    ...r.stderr.slice(0, abortLine < 0 ? undefined : abortLine).matchAll(
+      /"event":"child","turnId":"([^"]+)"/g,
+    ),
+  ].map((m) => m[1]);
+  return { ...r, elapsed, interrupts, stream, seenBeforeAbort };
 }
 
 const count = (text, re) => (text.match(re) ?? []).length;
@@ -203,6 +221,8 @@ test(
         const r = await play(scenario);
         const { stream } = r;
         const ctx = JSON.stringify({ scenario, code: r.code, stderr: r.stderr, stdout: r.stdout });
+        // A 401 naming an unknown turn must never end the run (it is held, never ours).
+        if (trigger.kind === "none") assert.doesNotMatch(r.stderr, /401 Unauthorized/, ctx);
 
         // (a) Exactly one ending, reported once.
         const endings = [
@@ -216,32 +236,26 @@ test(
 
         // (b) Exit code and interrupt targets follow the trigger; the review child, which the
         // grammar says always announces itself, is interrupted first.
-        // Children the grammar makes the driver aware of: the review child always (it is
-        // waited for), plus every C sent before the trigger. C's sent after the trigger may
-        // or may not be seen before the interrupt goes out; they are allowed, not required.
-        const bodyChildren = scenario.body
-          .map((k, i) => (k === "C" ? childId(i) : null))
-          .filter((id) => id !== null);
+        // Children on our thread, in wire order (the review child is not in `stream` when it
+        // rode ahead of the start response, so add it explicitly).
         const reviewChild = review ? [CHILD_TURN] : [];
-        const at = Math.min(trigger.pos, stream.length);
         const streamChildren = stream
-          .map((m, i) =>
-            m.method === "turn/started" && m.params.threadId === OWN_THREAD
-              ? { id: m.params.turn.id, i }
-              : null
-          )
-          .filter((x) => x !== null);
-        const seenBefore = streamChildren.filter((x) => x.i < at).map((x) => x.id);
-        const required = new Set([...reviewChild, ...seenBefore]);
-        const allowed = new Set([...reviewChild, ...bodyChildren]);
+          .filter((m) => m.method === "turn/started" && m.params.threadId === OWN_THREAD)
+          .map((m) => m.params.turn.id);
+        const allChildren = [...new Set([...reviewChild, ...streamChildren])];
+        // Required interrupt targets: the review child (waited for by grammar) and every
+        // child the driver reported seeing before it announced the abort. Children it
+        // learned of later may or may not make it into the interrupt: allowed, not required.
+        const required = new Set([...reviewChild, ...r.seenBeforeAbort]);
+        const allowed = new Set(allChildren);
         if (trigger.kind === "none") {
           assert.equal(r.code, 0, ctx);
           assert.deepEqual(r.interrupts, [], ctx);
           const out = JSON.parse(r.stdout);
           assert.equal(out.threadId, OWN_THREAD, ctx);
           assert.equal(out.turnId, OWN_TURN, ctx);
-          assert.equal(out.reviewTurnId, [...reviewChild, ...bodyChildren][0] ?? null, ctx);
-          assert.deepEqual(out.childTurnIds, [...reviewChild, ...bodyChildren], ctx);
+          assert.equal(out.reviewTurnId, allChildren[0] ?? null, ctx);
+          assert.deepEqual(out.childTurnIds, allChildren, ctx);
           assert.equal(out.turnStatus, "completed", ctx);
           assert.doesNotMatch(String(out.finalMessage), /WRONG/, ctx);
         } else {
