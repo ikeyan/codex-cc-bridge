@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-DMJ5FmTa.js";
-import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-CUvTVrPI.js";
+import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-BDvtGtsp.js";
+import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-BbNuMJML.js";
 import { debugLogWithPrefix, errorLog, mcpDebugWithPrefix } from "./debugLog-LfbHS9a2.js";
 import "./configLoader-CZlYj_hr.js";
 import "./NodeFileSystemApi-CcTrKwya.js";
@@ -10,8 +10,8 @@ import { join } from "node:path";
 import { existsSync as existsSync$1, readFileSync, readdirSync } from "fs";
 import { dirname, join as join$1 } from "path";
 import { execSync, spawn } from "child_process";
-import { platform } from "os";
 import { fileURLToPath } from "url";
+import { platform } from "os";
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import { glob } from "gitaware-glob";
 import { minimatch } from "minimatch";
@@ -558,7 +558,7 @@ async function runLanguageServerWithConfig(config, _positionals = [], customEnv)
 			supportsIncrementalSync: config.serverCharacteristics.supportsIncrementalSync,
 			supportsPullDiagnostics: config.serverCharacteristics.supportsPullDiagnostics
 		} : void 0;
-		const { createAndInitializeLSPClient } = await import("./src-CCMCi9Lo.js");
+		const { createAndInitializeLSPClient } = await import("./src-CuAM-UJ8.js");
 		const lspClient = await createAndInitializeLSPClient(projectRoot, lspProcess, config.id || config.preset || "custom", config.initializationOptions, serverChars);
 		const { NodeFileSystemApi } = await import("./NodeFileSystemApi-Cv425szp.js");
 		const fileSystemApi = new NodeFileSystemApi();
@@ -1701,7 +1701,7 @@ async function listTools(presetName, disableList) {
 			config = result.config;
 			console.log(`Preset: ${presetName}\n`);
 		}
-		const { getAllAvailableTools } = await import("./getAllTools-C8ek4q2J.js");
+		const { getAllAvailableTools } = await import("./getAllTools-Bm4DX3IG.js");
 		const { filterUnsupportedTools: filterUnsupportedTools$1 } = await import("./toolFilters-DnaKbFIC.js");
 		const allTools = await getAllAvailableTools(config);
 		let filteredTools = allTools;
