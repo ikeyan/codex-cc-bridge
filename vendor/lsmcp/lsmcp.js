@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-BDvtGtsp.js";
-import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-Chhv2k4E.js";
+import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-C3wCp3r_.js";
+import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-DcEnzO95.js";
 import { debugLogWithPrefix, errorLog, mcpDebugWithPrefix } from "./debugLog-LfbHS9a2.js";
 import "./configLoader-CZlYj_hr.js";
 import "./NodeFileSystemApi-CcTrKwya.js";
@@ -561,7 +561,7 @@ async function runLanguageServerWithConfig(config, _positionals = [], customEnv)
 			supportsIncrementalSync: config.serverCharacteristics.supportsIncrementalSync,
 			supportsPullDiagnostics: config.serverCharacteristics.supportsPullDiagnostics
 		} : void 0;
-		const { createAndInitializeLSPClient } = await import("./src-CuAM-UJ8.js");
+		const { createAndInitializeLSPClient } = await import("./src-DSu6jvlk.js");
 		const lspClient = await createAndInitializeLSPClient(projectRoot, lspProcess, config.id || config.preset || "custom", config.initializationOptions, serverChars);
 		const { NodeFileSystemApi } = await import("./NodeFileSystemApi-Cv425szp.js");
 		const fileSystemApi = new NodeFileSystemApi();
@@ -1704,7 +1704,7 @@ async function listTools(presetName, disableList) {
 			config = result.config;
 			console.log(`Preset: ${presetName}\n`);
 		}
-		const { getAllAvailableTools } = await import("./getAllTools-CwashjHY.js");
+		const { getAllAvailableTools } = await import("./getAllTools-CVOXcNmx.js");
 		const { filterUnsupportedTools: filterUnsupportedTools$1 } = await import("./toolFilters-DnaKbFIC.js");
 		const allTools = await getAllAvailableTools(config);
 		let filteredTools = allTools;
