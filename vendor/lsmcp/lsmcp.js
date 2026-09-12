@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-BDvtGtsp.js";
-import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-BbNuMJML.js";
+import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-Chhv2k4E.js";
 import { debugLogWithPrefix, errorLog, mcpDebugWithPrefix } from "./debugLog-LfbHS9a2.js";
 import "./configLoader-CZlYj_hr.js";
 import "./NodeFileSystemApi-CcTrKwya.js";
 import { parseArgs } from "node:util";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { existsSync as existsSync$1, readFileSync, readdirSync } from "fs";
+import { existsSync as existsSync$1, readdirSync } from "fs";
 import { dirname, join as join$1 } from "path";
-import { execSync, spawn } from "child_process";
+import { execSync, spawn, spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { platform } from "os";
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
@@ -270,44 +270,7 @@ function getNodeModulesCommand(binName, args = [], projectRoot) {
 }
 
 //#endregion
-//#region src/utils/packageVersion.ts
-/**
-* Major version of the package installed under `nodeModulesDir`, or undefined
-* when it is not installed or its package.json cannot be read.
-*/
-function installedPackageMajor(nodeModulesDir, packageName) {
-	try {
-		const { version } = JSON.parse(readFileSync(join$1(nodeModulesDir, packageName, "package.json"), "utf-8"));
-		const major = parseInt(String(version), 10);
-		return Number.isNaN(major) ? void 0 : major;
-	} catch {
-		return void 0;
-	}
-}
-
-//#endregion
 //#region src/utils/binFinder.ts
-/**
-* Binary names and args for a node_modules item. The nearest installed copy
-* of `override.package` decides once whether the override applies.
-*/
-function candidatesFor(nodeModulesDirs, item, defaultArgs) {
-	const plain = {
-		names: item.names,
-		args: defaultArgs
-	};
-	const override = item.override;
-	if (!override) return plain;
-	for (const nodeModules of nodeModulesDirs) {
-		const major = installedPackageMajor(nodeModules, override.package);
-		if (major === void 0) continue;
-		return major >= override.minMajor ? {
-			names: override.names,
-			args: override.args ?? defaultArgs
-		} : plain;
-	}
-	return plain;
-}
 /** `dir` followed by each of its ancestors up to the filesystem root. */
 function* selfAndAncestors(dir) {
 	let current = dir;
@@ -333,140 +296,180 @@ function findBinary(strategy, projectRoot = process.cwd()) {
 	const defaultArgs = strategy.defaultArgs || [];
 	for (const item of strategy.strategies) {
 		mcpDebugWithPrefix("BinFinder", `Trying strategy: ${item.type}`);
-		switch (item.type) {
-			case "venv": {
-				const venvDirs = item.venvDirs || [".venv", "venv"];
-				for (const name of item.names) for (const dir of selfAndAncestors(projectRoot)) for (const venvDir of venvDirs) {
-					const venvBin = join$1(dir, venvDir, "bin", name);
-					if (existsSync$1(venvBin)) {
-						mcpDebugWithPrefix("BinFinder", `Found in Python ${venvDir}: ${venvBin}`);
-						return {
-							command: venvBin,
-							args: defaultArgs
-						};
-					}
-				}
-				break;
-			}
-			case "node_modules": {
-				const nodeModulesDirs = [...selfAndAncestors(projectRoot)].map((dir) => join$1(dir, "node_modules"));
-				const { names, args } = candidatesFor(nodeModulesDirs, item, defaultArgs);
-				for (const nodeModules of nodeModulesDirs) for (const name of names) {
-					const bin = join$1(nodeModules, ".bin", name);
-					if (existsSync$1(bin)) {
-						mcpDebugWithPrefix("BinFinder", `Found in node_modules: ${bin}`);
-						return {
-							command: bin,
-							args
-						};
-					}
-				}
-				break;
-			}
-			case "global": {
-				for (const name of item.names) try {
-					const globalPath = execSync(`which ${name}`, {
-						encoding: "utf-8",
-						stdio: [
-							"pipe",
-							"pipe",
-							"ignore"
-						]
-					}).trim();
-					if (globalPath) {
-						mcpDebugWithPrefix("BinFinder", `Found globally: ${globalPath}`);
-						return {
-							command: globalPath,
-							args: defaultArgs
-						};
-					}
-				} catch {}
-				break;
-			}
-			case "uv": {
-				try {
-					execSync("which uv", {
-						encoding: "utf-8",
-						stdio: [
-							"pipe",
-							"pipe",
-							"ignore"
-						]
-					});
-					const uvLockPath = join$1(projectRoot, "uv.lock");
-					const pyprojectPath = join$1(projectRoot, "pyproject.toml");
-					if (existsSync$1(uvLockPath) || existsSync$1(pyprojectPath)) {
-						mcpDebugWithPrefix("BinFinder", `Using uv run: ${item.command || item.tool}`);
-						if (item.command) return {
-							command: "uv",
-							args: [
-								"run",
-								item.command,
-								...defaultArgs
-							]
-						};
-						else return {
-							command: "uv",
-							args: [
-								"run",
-								item.tool,
-								...defaultArgs
-							]
-						};
-					} else {
-						mcpDebugWithPrefix("BinFinder", `Using uv tool run: ${item.tool}`);
-						if (item.command) return {
-							command: "uv",
-							args: [
-								"tool",
-								"run",
-								"--from",
-								item.tool,
-								item.command,
-								...defaultArgs
-							]
-						};
-						else return {
-							command: "uv",
-							args: [
-								"tool",
-								"run",
-								item.tool,
-								...defaultArgs
-							]
-						};
-					}
-				} catch {
-					mcpDebugWithPrefix("BinFinder", `uv not found, skipping uv strategy`);
-				}
-				break;
-			}
-			case "npx": {
-				mcpDebugWithPrefix("BinFinder", `Using npx: ${item.package}`);
-				return {
-					command: "npx",
-					args: [
-						"-y",
-						item.package,
-						...defaultArgs
-					]
-				};
-			}
-			case "path": {
-				const expandedPath = item.path.replace(/^~/, process.env.HOME || process.env.USERPROFILE || "");
-				if (existsSync$1(expandedPath)) {
-					mcpDebugWithPrefix("BinFinder", `Found at path: ${expandedPath}`);
-					return {
-						command: expandedPath,
-						args: defaultArgs
-					};
-				}
-				break;
-			}
-		}
+		const found = findWithItem(item, projectRoot, defaultArgs);
+		if (found) return found;
 	}
 	mcpDebugWithPrefix("BinFinder", `Binary not found with any strategy`);
 	return null;
+}
+function findWithItem(item, projectRoot, defaultArgs) {
+	switch (item.type) {
+		case "venv": {
+			const venvDirs = item.venvDirs || [".venv", "venv"];
+			for (const name of item.names) for (const dir of selfAndAncestors(projectRoot)) for (const venvDir of venvDirs) {
+				const venvBin = join$1(dir, venvDir, "bin", name);
+				if (existsSync$1(venvBin)) {
+					mcpDebugWithPrefix("BinFinder", `Found in Python ${venvDir}: ${venvBin}`);
+					return {
+						command: venvBin,
+						args: defaultArgs
+					};
+				}
+			}
+			return null;
+		}
+		case "node_modules": {
+			const args = item.args ?? defaultArgs;
+			for (const dir of selfAndAncestors(projectRoot)) for (const name of item.names) {
+				const bin = join$1(dir, "node_modules", ".bin", name);
+				if (existsSync$1(bin)) {
+					mcpDebugWithPrefix("BinFinder", `Found in node_modules: ${bin}`);
+					return accept({
+						command: bin,
+						args
+					}, item, projectRoot, defaultArgs);
+				}
+			}
+			return null;
+		}
+		case "global": {
+			const args = item.args ?? defaultArgs;
+			for (const name of item.names) try {
+				const globalPath = execSync(`which ${name}`, {
+					encoding: "utf-8",
+					stdio: [
+						"pipe",
+						"pipe",
+						"ignore"
+					]
+				}).trim();
+				if (globalPath) {
+					mcpDebugWithPrefix("BinFinder", `Found globally: ${globalPath}`);
+					return accept({
+						command: globalPath,
+						args
+					}, item, projectRoot, defaultArgs);
+				}
+			} catch {}
+			return null;
+		}
+		case "uv": {
+			try {
+				execSync("which uv", {
+					encoding: "utf-8",
+					stdio: [
+						"pipe",
+						"pipe",
+						"ignore"
+					]
+				});
+				const uvLockPath = join$1(projectRoot, "uv.lock");
+				const pyprojectPath = join$1(projectRoot, "pyproject.toml");
+				if (existsSync$1(uvLockPath) || existsSync$1(pyprojectPath)) {
+					mcpDebugWithPrefix("BinFinder", `Using uv run: ${item.command || item.tool}`);
+					if (item.command) return {
+						command: "uv",
+						args: [
+							"run",
+							item.command,
+							...defaultArgs
+						]
+					};
+					else return {
+						command: "uv",
+						args: [
+							"run",
+							item.tool,
+							...defaultArgs
+						]
+					};
+				} else {
+					mcpDebugWithPrefix("BinFinder", `Using uv tool run: ${item.tool}`);
+					if (item.command) return {
+						command: "uv",
+						args: [
+							"tool",
+							"run",
+							"--from",
+							item.tool,
+							item.command,
+							...defaultArgs
+						]
+					};
+					else return {
+						command: "uv",
+						args: [
+							"tool",
+							"run",
+							item.tool,
+							...defaultArgs
+						]
+					};
+				}
+			} catch {
+				mcpDebugWithPrefix("BinFinder", `uv not found, skipping uv strategy`);
+			}
+			return null;
+		}
+		case "npx": {
+			mcpDebugWithPrefix("BinFinder", `Using npx: ${item.package}`);
+			return {
+				command: "npx",
+				args: [
+					"-y",
+					item.package,
+					...defaultArgs
+				]
+			};
+		}
+		case "path": {
+			const expandedPath = item.path.replace(/^~/, process.env.HOME || process.env.USERPROFILE || "");
+			if (existsSync$1(expandedPath)) {
+				mcpDebugWithPrefix("BinFinder", `Found at path: ${expandedPath}`);
+				return {
+					command: expandedPath,
+					args: defaultArgs
+				};
+			}
+			return null;
+		}
+	}
+}
+/**
+* A found binary is used as is unless the item has `ifFail`; then it must
+* answer an LSP initialize request, otherwise the `ifFail` strategies decide.
+*/
+function accept(found, item, projectRoot, defaultArgs) {
+	if (!item.ifFail || speaksLsp(found)) return found;
+	mcpDebugWithPrefix("BinFinder", `${found.command} ${found.args.join(" ")} did not answer initialize; trying ifFail strategies`);
+	return findBinary({
+		strategies: item.ifFail,
+		defaultArgs
+	}, projectRoot);
+}
+const INITIALIZE_REQUEST = JSON.stringify({
+	jsonrpc: "2.0",
+	id: 1,
+	method: "initialize",
+	params: {
+		processId: null,
+		rootUri: null,
+		capabilities: {}
+	}
+});
+/** Run the binary once with an initialize request on stdin; JSON-RPC frames on stdout mean it speaks LSP. */
+function speaksLsp({ command, args }) {
+	const result = spawnSync(command, args, {
+		input: `Content-Length: ${Buffer.byteLength(INITIALIZE_REQUEST)}\r\n\r\n${INITIALIZE_REQUEST}`,
+		encoding: "utf8",
+		stdio: [
+			"pipe",
+			"pipe",
+			"ignore"
+		],
+		timeout: 1e4
+	});
+	return (result?.stdout ?? "").trimStart().startsWith("Content-Length:");
 }
 /**
 * Resolve the command for an adapter, using binFindStrategy if available
@@ -1701,7 +1704,7 @@ async function listTools(presetName, disableList) {
 			config = result.config;
 			console.log(`Preset: ${presetName}\n`);
 		}
-		const { getAllAvailableTools } = await import("./getAllTools-Bm4DX3IG.js");
+		const { getAllAvailableTools } = await import("./getAllTools-CwashjHY.js");
 		const { filterUnsupportedTools: filterUnsupportedTools$1 } = await import("./toolFilters-DnaKbFIC.js");
 		const allTools = await getAllAvailableTools(config);
 		let filteredTools = allTools;
