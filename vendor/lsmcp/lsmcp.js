@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-DHLPu3oG.js";
-import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-BR8uR9BM.js";
+import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-CDSOnyDI.js";
 import { debugLogWithPrefix, errorLog, mcpDebugWithPrefix } from "./debugLog-LfbHS9a2.js";
 import "./configLoader-CZlYj_hr.js";
 import "./NodeFileSystemApi-CcTrKwya.js";
@@ -313,7 +313,9 @@ async function startFirstWorking(candidates, start) {
 	let failed;
 	let lastError = new Error("No LSP server binary specified or found");
 	for (let r = candidates.next(failed); !r.done; r = candidates.next(failed)) try {
-		return await start(r.value);
+		const started = await start(r.value);
+		candidates.return?.();
+		return started;
 	} catch (error) {
 		mcpDebugWithPrefix("BinFinder", `${r.value.command} ${r.value.args.join(" ")} failed to start: ${error instanceof Error ? error.message : String(error)}`);
 		lastError = error;
@@ -528,19 +530,9 @@ function resolveAdapterCommand(adapter, projectRoot) {
 	};
 	throw new Error("No LSP server binary specified or found");
 }
-/**
-* Every command an adapter may run, in order; explicit bin configuration
-* (no binFindStrategy) is the single candidate.
-*/
-function* adapterCandidates(adapter, projectRoot) {
-	if (adapter.bin && !adapter.binFindStrategy) {
-		yield {
-			command: adapter.bin,
-			args: adapter.args || []
-		};
-		return;
-	}
-	yield* adapterCandidates$1(adapter, projectRoot);
+/** Every command an adapter may run, in order */
+function adapterCandidates(adapter, projectRoot) {
+	return adapterCandidates$1(adapter, projectRoot);
 }
 
 //#endregion
@@ -1027,7 +1019,7 @@ async function indexCommand(projectRoot, isFromInit = false, configLoader, adapt
 		}
 	} catch (error) {
 		errorLog(`Failed to start LSP server: ${error instanceof Error ? error.message : String(error)}`);
-		if (error instanceof Error && error.message.includes("Command not found")) {
+		if (error instanceof Error && (error.message.includes("ENOENT") || error.message.includes("No LSP server binary"))) {
 			if (config.preset === "tsgo") {
 				errorLog("\nTo install tsgo:");
 				errorLog("  npm install -g @typescript/native-preview");
@@ -1718,7 +1710,7 @@ async function listTools(presetName, disableList) {
 			config = result.config;
 			console.log(`Preset: ${presetName}\n`);
 		}
-		const { getAllAvailableTools } = await import("./getAllTools-Do8qTRoa.js");
+		const { getAllAvailableTools } = await import("./getAllTools-Dup9f-rz.js");
 		const { filterUnsupportedTools: filterUnsupportedTools$1 } = await import("./toolFilters-DnaKbFIC.js");
 		const allTools = await getAllAvailableTools(config);
 		let filteredTools = allTools;
