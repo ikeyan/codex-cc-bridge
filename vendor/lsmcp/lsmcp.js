@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-DHLPu3oG.js";
-import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-CDSOnyDI.js";
+import { CapabilityChecker, ErrorCode, LSMCPError, createLSPClient, createLSPSymbolProvider, createToolCapabilityMap, debug, debug$1, formatError$1 as formatError } from "./src-DJ68oeER.js";
+import { ConfigLoader, NodeFileSystem, SQLiteCache, SymbolIndex, createGetSymbolDetailsTool, createLSPTools, getOrCreateIndex, getSerenityToolsList, globalPresetRegistry, highLevelTools, onboardingToolsList, registerBuiltinAdapters } from "./toolLists-BRcB_lIa.js";
 import { debugLogWithPrefix, errorLog, mcpDebugWithPrefix } from "./debugLog-LfbHS9a2.js";
 import "./configLoader-CZlYj_hr.js";
 import "./NodeFileSystemApi-CcTrKwya.js";
@@ -282,21 +282,24 @@ function* selfAndAncestors(dir) {
 	}
 }
 /**
-* The binaries a strategy proposes, in order. Send `true` to next() when the
-* candidate just yielded failed to start: the item's `ifFail` strategies are
-* then tried before the following items.
+* The binaries a strategy proposes, in order, each at most once. Send `true`
+* to next() when the candidate just yielded failed to start: the item's
+* `ifFail` strategies are then tried before the following items.
 */
-function* candidateCommands(strategy, projectRoot = process.cwd()) {
+function* candidateCommands(strategy, projectRoot = process.cwd(), seen = /* @__PURE__ */ new Set()) {
 	const defaultArgs = strategy.defaultArgs || [];
 	for (const item of strategy.strategies) {
 		mcpDebugWithPrefix("BinFinder", `Trying strategy: ${item.type}`);
 		const found = locate(item, projectRoot, defaultArgs);
 		if (!found) continue;
+		const key = JSON.stringify([found.command, found.args]);
+		if (seen.has(key)) continue;
+		seen.add(key);
 		const failed = yield found;
 		if (failed && "ifFail" in item && item.ifFail) yield* candidateCommands({
 			strategies: item.ifFail,
 			defaultArgs
-		}, projectRoot);
+		}, projectRoot, seen);
 	}
 }
 /** The first candidate of a strategy, or null */
@@ -341,7 +344,7 @@ function locate(item, projectRoot, defaultArgs) {
 		}
 		case "node_modules": {
 			const args = item.args ?? defaultArgs;
-			for (const dir of selfAndAncestors(projectRoot)) for (const name of item.names) {
+			for (const name of item.names) for (const dir of selfAndAncestors(projectRoot)) {
 				const bin = join$1(dir, "node_modules", ".bin", name);
 				if (existsSync$1(bin)) {
 					mcpDebugWithPrefix("BinFinder", `Found in node_modules: ${bin}`);
@@ -456,6 +459,21 @@ function locate(item, projectRoot, defaultArgs) {
 		}
 	}
 }
+/**
+* Spawn candidates in order and initialize each with `init`; the first that
+* initializes is returned together with the command that was started.
+*/
+function spawnFirstWorking(candidates, options, init) {
+	return startFirstWorking(candidates, async (found) => {
+		const lspProcess = spawn(found.command, found.args, options);
+		const lspClient = await init(lspProcess, found);
+		return {
+			found,
+			lspProcess,
+			lspClient
+		};
+	});
+}
 /** Every binary an adapter may run, in the order resolveAdapterCommand would pick them */
 function* adapterCandidates$1(adapter, projectRoot) {
 	if (adapter.bin && adapter.args && adapter.args.length > 0) {
@@ -550,29 +568,21 @@ async function runLanguageServerWithConfig(config, _positionals = [], customEnv)
 			supportsIncrementalSync: config.serverCharacteristics.supportsIncrementalSync,
 			supportsPullDiagnostics: config.serverCharacteristics.supportsPullDiagnostics
 		} : void 0;
-		const { createAndInitializeLSPClient } = await import("./src-CfvNtZaf.js");
-		const { lspProcess, lspClient, found } = await startFirstWorking(adapterCandidates({
+		const { createAndInitializeLSPClient } = await import("./src-e5IfotI5.js");
+		const { lspProcess, lspClient, found } = await spawnFirstWorking(adapterCandidates({
 			id: config.id || config.preset || "custom",
 			name: config.name || config.preset || "Custom LSP",
 			bin: config.bin,
 			args: config.args || [],
 			files: config.files || [],
 			binFindStrategy: config.binFindStrategy
-		}, projectRoot), async (found$1) => {
-			const lspProcess$1 = spawn(found$1.command, found$1.args, {
-				cwd: projectRoot,
-				env: {
-					...process.env,
-					...customEnv
-				}
-			});
-			const lspClient$1 = await createAndInitializeLSPClient(projectRoot, lspProcess$1, config.id || config.preset || "custom", config.initializationOptions, serverChars);
-			return {
-				lspProcess: lspProcess$1,
-				lspClient: lspClient$1,
-				found: found$1
-			};
-		});
+		}, projectRoot), {
+			cwd: projectRoot,
+			env: {
+				...process.env,
+				...customEnv
+			}
+		}, (lspProcess$1) => createAndInitializeLSPClient(projectRoot, lspProcess$1, config.id || config.preset || "custom", config.initializationOptions, serverChars));
 		const { NodeFileSystemApi } = await import("./NodeFileSystemApi-Cv425szp.js");
 		const fileSystemApi = new NodeFileSystemApi();
 		const mcpContext = {
@@ -978,15 +988,14 @@ async function indexCommand(projectRoot, isFromInit = false, configLoader, adapt
 		if (!presetConfig) throw new Error(`Unknown preset: ${config.preset}`);
 		const adapterConfig = presetConfig;
 		console.log(`Starting ${adapterConfig.name || adapterConfig.presetId} for indexing...`);
-		lspClient = await startFirstWorking(adapterCandidates(adapterConfig, projectRoot), async ({ command, args }) => {
-			const lspProcess = spawn(command, args, {
-				stdio: [
-					"pipe",
-					"pipe",
-					"pipe"
-				],
-				cwd: projectRoot
-			});
+		({lspClient} = await spawnFirstWorking(adapterCandidates(adapterConfig, projectRoot), {
+			stdio: [
+				"pipe",
+				"pipe",
+				"pipe"
+			],
+			cwd: projectRoot
+		}, async (lspProcess, { command }) => {
 			lspProcess.on("error", (error) => {
 				errorLog(`Failed to start ${command}: ${error.message}`);
 				if (error.message.includes("ENOENT")) {
@@ -1005,7 +1014,7 @@ async function indexCommand(projectRoot, isFromInit = false, configLoader, adapt
 			});
 			await client.start();
 			return client;
-		});
+		}));
 		const fileContentProvider = async (uri) => {
 			const path$1 = fileURLToPath(uri);
 			return await readFile(path$1, "utf-8");
@@ -1710,7 +1719,7 @@ async function listTools(presetName, disableList) {
 			config = result.config;
 			console.log(`Preset: ${presetName}\n`);
 		}
-		const { getAllAvailableTools } = await import("./getAllTools-Dup9f-rz.js");
+		const { getAllAvailableTools } = await import("./getAllTools-DI__r0ke.js");
 		const { filterUnsupportedTools: filterUnsupportedTools$1 } = await import("./toolFilters-DnaKbFIC.js");
 		const allTools = await getAllAvailableTools(config);
 		let filteredTools = allTools;
