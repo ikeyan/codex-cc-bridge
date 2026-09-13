@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { existsSync as existsSync$1, readdirSync } from "fs";
 import { dirname, join as join$1 } from "path";
-import { execSync, spawn, spawnSync } from "child_process";
+import { execSync, spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { platform } from "os";
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
@@ -282,27 +282,46 @@ function* selfAndAncestors(dir) {
 	}
 }
 /**
-* Find a binary using the specified strategy
-*
-* Strategies are tried in the order specified in the configuration.
-* Each strategy type has its own search logic.
-*
-* @param strategy The binary find strategy configuration
-* @param projectRoot The project root directory
-* @returns The resolved command and args, or null if not found
+* The binaries a strategy proposes, in order. Send `true` to next() when the
+* candidate just yielded failed to start: the item's `ifFail` strategies are
+* then tried before the following items.
 */
-function findBinary(strategy, projectRoot = process.cwd()) {
-	mcpDebugWithPrefix("BinFinder", `Searching for binary with strategy:`, strategy);
+function* candidateCommands(strategy, projectRoot = process.cwd()) {
 	const defaultArgs = strategy.defaultArgs || [];
 	for (const item of strategy.strategies) {
 		mcpDebugWithPrefix("BinFinder", `Trying strategy: ${item.type}`);
-		const found = findWithItem(item, projectRoot, defaultArgs);
-		if (found) return found;
+		const found = locate(item, projectRoot, defaultArgs);
+		if (!found) continue;
+		const failed = yield found;
+		if (failed && "ifFail" in item && item.ifFail) yield* candidateCommands({
+			strategies: item.ifFail,
+			defaultArgs
+		}, projectRoot);
 	}
-	mcpDebugWithPrefix("BinFinder", `Binary not found with any strategy`);
-	return null;
 }
-function findWithItem(item, projectRoot, defaultArgs) {
+/** The first candidate of a strategy, or null */
+function findBinary(strategy, projectRoot = process.cwd()) {
+	const first = candidateCommands(strategy, projectRoot).next();
+	return first.done ? null : first.value;
+}
+/**
+* Start candidates in order until one succeeds. A candidate whose `start`
+* rejects is reported back to the generator so its fallbacks are tried;
+* when none succeeds the last error is thrown.
+*/
+async function startFirstWorking(candidates, start) {
+	let failed;
+	let lastError = new Error("No LSP server binary specified or found");
+	for (let r = candidates.next(failed); !r.done; r = candidates.next(failed)) try {
+		return await start(r.value);
+	} catch (error) {
+		mcpDebugWithPrefix("BinFinder", `${r.value.command} ${r.value.args.join(" ")} failed to start: ${error instanceof Error ? error.message : String(error)}`);
+		lastError = error;
+		failed = true;
+	}
+	throw lastError;
+}
+function locate(item, projectRoot, defaultArgs) {
 	switch (item.type) {
 		case "venv": {
 			const venvDirs = item.venvDirs || [".venv", "venv"];
@@ -324,10 +343,10 @@ function findWithItem(item, projectRoot, defaultArgs) {
 				const bin = join$1(dir, "node_modules", ".bin", name);
 				if (existsSync$1(bin)) {
 					mcpDebugWithPrefix("BinFinder", `Found in node_modules: ${bin}`);
-					return accept({
+					return {
 						command: bin,
 						args
-					}, item, projectRoot, defaultArgs);
+					};
 				}
 			}
 			return null;
@@ -345,10 +364,10 @@ function findWithItem(item, projectRoot, defaultArgs) {
 				}).trim();
 				if (globalPath) {
 					mcpDebugWithPrefix("BinFinder", `Found globally: ${globalPath}`);
-					return accept({
+					return {
 						command: globalPath,
 						args
-					}, item, projectRoot, defaultArgs);
+					};
 				}
 			} catch {}
 			return null;
@@ -435,41 +454,20 @@ function findWithItem(item, projectRoot, defaultArgs) {
 		}
 	}
 }
-/**
-* A found binary is used as is unless the item has `ifFail`; then it must
-* answer an LSP initialize request, otherwise the `ifFail` strategies decide.
-*/
-function accept(found, item, projectRoot, defaultArgs) {
-	if (!item.ifFail || speaksLsp(found)) return found;
-	mcpDebugWithPrefix("BinFinder", `${found.command} ${found.args.join(" ")} did not answer initialize; trying ifFail strategies`);
-	return findBinary({
-		strategies: item.ifFail,
-		defaultArgs
-	}, projectRoot);
-}
-const INITIALIZE_REQUEST = JSON.stringify({
-	jsonrpc: "2.0",
-	id: 1,
-	method: "initialize",
-	params: {
-		processId: null,
-		rootUri: null,
-		capabilities: {}
+/** Every binary an adapter may run, in the order resolveAdapterCommand would pick them */
+function* adapterCandidates$1(adapter, projectRoot) {
+	if (adapter.bin && adapter.args && adapter.args.length > 0) {
+		yield {
+			command: adapter.bin,
+			args: adapter.args
+		};
+		return;
 	}
-});
-/** Run the binary once with an initialize request on stdin; JSON-RPC frames on stdout mean it speaks LSP. */
-function speaksLsp({ command, args }) {
-	const result = spawnSync(command, args, {
-		input: `Content-Length: ${Buffer.byteLength(INITIALIZE_REQUEST)}\r\n\r\n${INITIALIZE_REQUEST}`,
-		encoding: "utf8",
-		stdio: [
-			"pipe",
-			"pipe",
-			"ignore"
-		],
-		timeout: 1e4
-	});
-	return (result?.stdout ?? "").trimStart().startsWith("Content-Length:");
+	if (adapter.binFindStrategy) yield* candidateCommands(adapter.binFindStrategy, projectRoot);
+	if (adapter.bin) yield {
+		command: adapter.bin,
+		args: adapter.args || []
+	};
 }
 /**
 * Resolve the command for an adapter, using binFindStrategy if available
@@ -530,6 +528,20 @@ function resolveAdapterCommand(adapter, projectRoot) {
 	};
 	throw new Error("No LSP server binary specified or found");
 }
+/**
+* Every command an adapter may run, in order; explicit bin configuration
+* (no binFindStrategy) is the single candidate.
+*/
+function* adapterCandidates(adapter, projectRoot) {
+	if (adapter.bin && !adapter.binFindStrategy) {
+		yield {
+			command: adapter.bin,
+			args: adapter.args || []
+		};
+		return;
+	}
+	yield* adapterCandidates$1(adapter, projectRoot);
+}
 
 //#endregion
 //#region src/lspServerRunner.ts
@@ -540,21 +552,6 @@ async function runLanguageServerWithConfig(config, _positionals = [], customEnv)
 	try {
 		const projectRoot = process.cwd();
 		if (!config.bin && !config.binFindStrategy) throw new Error(`Missing 'bin' field in configuration. Please specify a language server command or binFindStrategy.`);
-		const resolved = resolveAdapterCommand({
-			id: config.id || config.preset || "custom",
-			name: config.name || config.preset || "Custom LSP",
-			bin: config.bin,
-			args: config.args || [],
-			files: config.files || [],
-			binFindStrategy: config.binFindStrategy
-		}, projectRoot);
-		const lspProcess = spawn(resolved.command, resolved.args, {
-			cwd: projectRoot,
-			env: {
-				...process.env,
-				...customEnv
-			}
-		});
 		const serverChars = config.serverCharacteristics ? {
 			documentOpenDelay: config.serverCharacteristics.documentOpenDelay ?? 100,
 			operationTimeout: config.serverCharacteristics.operationTimeout ?? 3e4,
@@ -562,7 +559,28 @@ async function runLanguageServerWithConfig(config, _positionals = [], customEnv)
 			supportsPullDiagnostics: config.serverCharacteristics.supportsPullDiagnostics
 		} : void 0;
 		const { createAndInitializeLSPClient } = await import("./src-CfvNtZaf.js");
-		const lspClient = await createAndInitializeLSPClient(projectRoot, lspProcess, config.id || config.preset || "custom", config.initializationOptions, serverChars);
+		const { lspProcess, lspClient, found } = await startFirstWorking(adapterCandidates({
+			id: config.id || config.preset || "custom",
+			name: config.name || config.preset || "Custom LSP",
+			bin: config.bin,
+			args: config.args || [],
+			files: config.files || [],
+			binFindStrategy: config.binFindStrategy
+		}, projectRoot), async (found$1) => {
+			const lspProcess$1 = spawn(found$1.command, found$1.args, {
+				cwd: projectRoot,
+				env: {
+					...process.env,
+					...customEnv
+				}
+			});
+			const lspClient$1 = await createAndInitializeLSPClient(projectRoot, lspProcess$1, config.id || config.preset || "custom", config.initializationOptions, serverChars);
+			return {
+				lspProcess: lspProcess$1,
+				lspClient: lspClient$1,
+				found: found$1
+			};
+		});
 		const { NodeFileSystemApi } = await import("./NodeFileSystemApi-Cv425szp.js");
 		const fileSystemApi = new NodeFileSystemApi();
 		const mcpContext = {
@@ -597,7 +615,7 @@ async function runLanguageServerWithConfig(config, _positionals = [], customEnv)
 		server.registerTools(allTools);
 		await server.start();
 		debug$1(`lsmcp MCP server connected for: ${config.name}`);
-		const fullCommand = resolved.args.length > 0 ? `${resolved.command} ${resolved.args.join(" ")}` : resolved.command;
+		const fullCommand = found.args.length > 0 ? `${found.command} ${found.args.join(" ")}` : found.command;
 		lspProcess.on("error", (error) => {
 			const context = {
 				operation: "LSP server process",
@@ -968,38 +986,34 @@ async function indexCommand(projectRoot, isFromInit = false, configLoader, adapt
 		if (!presetConfig) throw new Error(`Unknown preset: ${config.preset}`);
 		const adapterConfig = presetConfig;
 		console.log(`Starting ${adapterConfig.name || adapterConfig.presetId} for indexing...`);
-		const { command, args } = resolveAdapterCommand(adapterConfig, projectRoot);
-		const { execSync: execSync$1 } = await import("child_process");
-		try {
-			execSync$1(`which ${command}`, { stdio: "ignore" });
-		} catch {
-			throw new Error(`Command not found: ${command}`);
-		}
-		const lspProcess = spawn(command, args, {
-			stdio: [
-				"pipe",
-				"pipe",
-				"pipe"
-			],
-			cwd: projectRoot
+		lspClient = await startFirstWorking(adapterCandidates(adapterConfig, projectRoot), async ({ command, args }) => {
+			const lspProcess = spawn(command, args, {
+				stdio: [
+					"pipe",
+					"pipe",
+					"pipe"
+				],
+				cwd: projectRoot
+			});
+			lspProcess.on("error", (error) => {
+				errorLog(`Failed to start ${command}: ${error.message}`);
+				if (error.message.includes("ENOENT")) {
+					errorLog(`Make sure ${adapterConfig.bin} is installed and in PATH`);
+					if (adapterConfig.presetId === "tsgo") errorLog("Install with: npm install -g @typescript/native-preview");
+					else if (adapterConfig.presetId === "typescript") errorLog("Install with: npm install -g typescript typescript-language-server");
+					else if (adapterConfig.presetId === "rust-analyzer") errorLog("Install rust-analyzer from: https://rust-analyzer.github.io/");
+				}
+			});
+			const client = createLSPClient({
+				process: lspProcess,
+				rootPath: projectRoot,
+				languageId: adapterConfig.baseLanguage || adapterConfig.presetId,
+				initializationOptions: adapterConfig.initializationOptions,
+				serverCharacteristics: adapterConfig.serverCharacteristics
+			});
+			await client.start();
+			return client;
 		});
-		lspProcess.on("error", (error) => {
-			errorLog(`Failed to start ${command}: ${error.message}`);
-			if (error.message.includes("ENOENT")) {
-				errorLog(`Make sure ${adapterConfig.bin} is installed and in PATH`);
-				if (adapterConfig.presetId === "tsgo") errorLog("Install with: npm install -g @typescript/native-preview");
-				else if (adapterConfig.presetId === "typescript") errorLog("Install with: npm install -g typescript typescript-language-server");
-				else if (adapterConfig.presetId === "rust-analyzer") errorLog("Install rust-analyzer from: https://rust-analyzer.github.io/");
-			}
-		});
-		lspClient = createLSPClient({
-			process: lspProcess,
-			rootPath: projectRoot,
-			languageId: adapterConfig.baseLanguage || adapterConfig.presetId,
-			initializationOptions: adapterConfig.initializationOptions,
-			serverCharacteristics: adapterConfig.serverCharacteristics
-		});
-		await lspClient?.start();
 		const fileContentProvider = async (uri) => {
 			const path$1 = fileURLToPath(uri);
 			return await readFile(path$1, "utf-8");
