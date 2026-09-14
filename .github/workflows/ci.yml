@@ -29,7 +29,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      # setup-uv は他の action と違い major タグ (v10) を公開しないので完全版で固定する。
+      # setup-uv は v8 以降 major タグ (v8, v9, v10...) を公開しなくなったので完全版で固定する。
       # 短くしようとして @v10 に戻すと `Unable to resolve action` で job ごと落ちる。
       - uses: astral-sh/setup-uv@v10.0.1
 

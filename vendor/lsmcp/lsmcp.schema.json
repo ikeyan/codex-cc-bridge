@@ -1,0 +1,249 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mizchi/lsmcp/lsmcp.schema.json",
+  "title": "LSMCP Configuration",
+  "description": "Configuration schema for Language Service MCP",
+  "$ref": "#/definitions/LSMCPConfig",
+  "definitions": {
+    "LSMCPConfig": {
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "type": "string",
+          "description": "JSON Schema reference",
+          "markdownDescription": "JSON Schema reference"
+        },
+        "preset": {
+          "type": "string",
+          "description": "Preset adapter to use",
+          "markdownDescription": "Preset adapter to use"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Glob patterns for files to index",
+          "markdownDescription": "Glob patterns for files to index"
+        },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "autoIndex": {
+              "type": "boolean",
+              "default": false,
+              "description": "Automatically index files on startup",
+              "markdownDescription": "Automatically index files on startup"
+            },
+            "indexConcurrency": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 5,
+              "description": "Number of files to index in parallel",
+              "markdownDescription": "Number of files to index in parallel"
+            },
+            "autoIndexDelay": {
+              "type": "number",
+              "minimum": 100,
+              "maximum": 5000,
+              "default": 500,
+              "description": "Delay before auto-indexing after file changes (ms)",
+              "markdownDescription": "Delay before auto-indexing after file changes (ms)"
+            },
+            "enableWatchers": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable file watchers for auto-indexing",
+              "markdownDescription": "Enable file watchers for auto-indexing"
+            },
+            "memoryLimit": {
+              "type": "number",
+              "minimum": 100,
+              "maximum": 4096,
+              "default": 1024,
+              "description": "Memory limit for indexing operations (MB)",
+              "markdownDescription": "Memory limit for indexing operations (MB)"
+            }
+          },
+          "additionalProperties": false,
+          "default": {},
+          "description": "Additional settings",
+          "markdownDescription": "Additional settings"
+        },
+        "ignorePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/.git/**"
+          ],
+          "description": "Additional ignore patterns for indexing",
+          "markdownDescription": "Additional ignore patterns for indexing"
+        },
+        "symbolFilter": {
+          "type": "object",
+          "properties": {
+            "excludeKinds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Symbol kinds to exclude from indexing",
+              "markdownDescription": "Symbol kinds to exclude from indexing"
+            },
+            "excludePatterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Regex patterns for symbols to exclude",
+              "markdownDescription": "Regex patterns for symbols to exclude"
+            },
+            "includeOnlyTopLevel": {
+              "type": "boolean",
+              "description": "Whether to include only top-level symbols",
+              "markdownDescription": "Whether to include only top-level symbols"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Symbol filtering configuration",
+          "markdownDescription": "Symbol filtering configuration"
+        },
+        "experiments": {
+          "type": "object",
+          "properties": {
+            "memory": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable advanced memory features with database storage",
+              "markdownDescription": "Enable advanced memory features with database storage"
+            }
+          },
+          "additionalProperties": false,
+          "default": {},
+          "description": "Experimental features configuration",
+          "markdownDescription": "Experimental features configuration"
+        },
+        "memoryAdvanced": {
+          "type": "boolean",
+          "description": "[Deprecated] Use experiments.memory instead",
+          "markdownDescription": "[Deprecated] Use experiments.memory instead"
+        },
+        "bin": {
+          "type": "string",
+          "description": "LSP server binary command",
+          "markdownDescription": "LSP server binary command"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Command line arguments",
+          "markdownDescription": "Command line arguments"
+        },
+        "initializationOptions": {
+          "description": "LSP initialization options",
+          "markdownDescription": "LSP initialization options"
+        },
+        "unsupported": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Unsupported LSP features",
+          "markdownDescription": "Unsupported LSP features"
+        },
+        "serverCharacteristics": {
+          "type": "object",
+          "properties": {
+            "documentOpenDelay": {
+              "type": "number",
+              "description": "Time to wait after opening a document before sending requests (ms)",
+              "markdownDescription": "Time to wait after opening a document before sending requests (ms)"
+            },
+            "readinessCheckTimeout": {
+              "type": "number",
+              "description": "Time to wait for server readiness check (ms)",
+              "markdownDescription": "Time to wait for server readiness check (ms)"
+            },
+            "initialDiagnosticsTimeout": {
+              "type": "number",
+              "description": "Time to wait for initial diagnostics (ms)",
+              "markdownDescription": "Time to wait for initial diagnostics (ms)"
+            },
+            "requiresProjectInit": {
+              "type": "boolean",
+              "description": "Whether the server requires project-level initialization",
+              "markdownDescription": "Whether the server requires project-level initialization"
+            },
+            "sendsInitialDiagnostics": {
+              "type": "boolean",
+              "description": "Whether the server sends diagnostics on document open",
+              "markdownDescription": "Whether the server sends diagnostics on document open"
+            },
+            "operationTimeout": {
+              "type": "number",
+              "description": "Maximum timeout for general operations (ms)",
+              "markdownDescription": "Maximum timeout for general operations (ms)"
+            },
+            "supportsIncrementalSync": {
+              "type": "boolean",
+              "description": "Whether the server supports incremental document synchronization",
+              "markdownDescription": "Whether the server supports incremental document synchronization"
+            },
+            "supportsPullDiagnostics": {
+              "type": "boolean",
+              "description": "Whether the server supports pull diagnostics",
+              "markdownDescription": "Whether the server supports pull diagnostics"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "examples": [
+    {
+      "preset": "tsgo"
+    },
+    {
+      "preset": "pyright",
+      "files": [
+        "**/*.py",
+        "**/*.pyi"
+      ]
+    },
+    {
+      "lsp": {
+        "bin": "deno",
+        "args": [
+          "lsp"
+        ]
+      },
+      "files": [
+        "**/*.ts",
+        "**/*.tsx"
+      ]
+    },
+    {
+      "preset": "tsgo",
+      "settings": {
+        "autoIndex": true,
+        "indexConcurrency": 10
+      },
+      "symbolFilter": {
+        "excludeKinds": [
+          "Variable",
+          "Constant"
+        ],
+        "includeOnlyTopLevel": true
+      }
+    }
+  ]
+}

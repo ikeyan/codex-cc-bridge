@@ -16,14 +16,18 @@ loopback で待ち受ける常駐プロセスは、放っておけば**同じマ
 1. **server 側**: `--ws-auth capability-token --ws-token-file <f>` 付きで起動する。token を知らない
    ローカルプロセスは handshake で拒否される。`--help` の文言は non-loopback 用と読めるが、
    **loopback でも機能する**ことを実測済み (canon: `facts/codex/claude-sandbox-integration`)。
-2. **driver 側**: token を必須にし (無ければ接続前に起動拒否)、endpoint が loopback でなければ
-   **token を送る前に**拒否する。加えて接続後に[[security/containment-probe|封じ込めプローブ]]。
+2. **driver 側**: token と port を `init`/`ready` が作ったセッションディレクトリからしか読まず
+   (無ければ接続前に起動拒否)、endpoint は常に `ws://127.0.0.1:<port>` に組む。host や URL を
+   受けるフラグが無いので、token が loopback 以外へ送られる argv 経路は存在しない。加えて接続後に
+   [[security/containment-probe|封じ込めプローブ]]。
 
 ## token ファイルは消さず、中身も読まない
 
-skill が「token ファイルはセッション中保持し、`cat` で中身をコンテキストに入れない」と
-指定しているのは、扱うものを**パスだけ**に保つためである。0600 のファイルに置いておけば、
-token 文字列は一度もデータとして持ち回られない。
+skill が「セッションディレクトリはセッション中保持し、token の中身を `cat` でコンテキストに
+入れない」と指定しているのは、扱うものを**パスだけ**に保つためである。0700 のディレクトリ内の
+0600 ファイルに置いておけば、token 文字列は一度もデータとして持ち回られない。ディレクトリを
+1 つの handle にしているのは、エージェントが port と token の 2 値を持ち回って取り違える
+余地を消すため (port は `ready` が readiness 確認後にだけ書き、1 ディレクトリ 1 server)。
 
 ## 却下した代替案
 

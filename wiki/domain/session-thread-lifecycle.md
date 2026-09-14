@@ -26,8 +26,9 @@ app-server はセッション終了で死ぬので、セッション跨ぎの常
 
 一方 thread は codex 側に残るので、**threadId さえ持ち回れば別セッションからでも `--thread` で
 継続できる**。だから driver は結果 JSON に必ず `threadId` を載せ、commands はそれをユーザーに
-提示する。`review/start` を使った場合はレビュー専用 thread に差し替わるので、返るのは
-`reviewThreadId` の方 (追加質問は `/codex-task --thread <id>` でそこに続ける)。
+提示する。`review/start` (inline) もレビューを同じ thread の上で走らせるので、返る `threadId` は
+レビューを起こした thread そのもの (追加質問は `/codex-task --thread <id>` でそこに続ける。
+[[domain/app-server-protocol-surface]])。
 
 ## server の寿命は background task の寿命
 

@@ -7,10 +7,11 @@
   "fmt": {
     "lineWidth": 100,
     // md は対象外: 日本語を語境界なしで折り返して壊す。REVIEW.md は上流と byte 一致も要る。
-    "exclude": ["**/*.md"]
+    // vendor/ は上流 build の丸ごとコピー (vendor/lsmcp/SOURCE 参照) なので整形しない。
+    "exclude": ["**/*.md", "vendor/"]
   },
   "lint": {
     // tests/ は node 専用ハーネス (driver だけ各ランタイムで回す) なので no-node-globals は誤検出。
-    "exclude": ["tests/"]
+    "exclude": ["tests/", "vendor/"]
   }
 }
