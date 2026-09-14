@@ -261,11 +261,17 @@ test(
         } else {
           assert.equal(r.code, trigger.kind === "sigterm" ? 130 : 1, ctx);
           const targets = r.interrupts.map((p) => p.turnId);
-          assert.equal(targets.at(-1), OWN_TURN, `own turn is interrupted last\n${ctx}`);
+          // Our own turn is interrupted exactly once; children the driver knew of before the
+          // first round precede it, children announced later follow it.
+          assert.equal(targets.filter((id) => id === OWN_TURN).length, 1, `own once\n${ctx}`);
+          const ownAt = targets.indexOf(OWN_TURN);
           assert.equal(new Set(targets).size, targets.length, `no duplicate interrupts\n${ctx}`);
-          for (const id of required) assert.ok(targets.includes(id), `missing ${id}\n${ctx}`);
-          for (const id of targets.slice(0, -1)) {
-            assert.ok(allowed.has(id), `unexpected ${id}\n${ctx}`);
+          for (const id of required) {
+            const at = targets.indexOf(id);
+            assert.ok(at >= 0 && at < ownAt, `${id} must be interrupted before our turn\n${ctx}`);
+          }
+          for (const id of targets) {
+            assert.ok(id === OWN_TURN || allowed.has(id), `unexpected ${id}\n${ctx}`);
           }
           for (const p of r.interrupts) assert.equal(p.threadId, OWN_THREAD, ctx);
           assert.doesNotMatch(r.stderr, /not acknowledged/, ctx);

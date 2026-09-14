@@ -874,20 +874,19 @@ async function interruptOwned(): Promise<void> {
       3000,
       "turn/interrupt",
     );
-  // Children keep announcing themselves while interrupts are in flight (the server does
-  // not stop on our account), so drain `children` until a round finds nothing new.
-  const interrupted = new Set<string>();
-  const interruptNewChildren = async (): Promise<void> => {
-    for (;;) {
-      const fresh = [...children].filter((id) => !interrupted.has(id));
-      if (fresh.length === 0) return;
-      for (const id of fresh) interrupted.add(id);
-      await interrupt(fresh);
-    }
+  // One round for everything known now, children first and our own turn in the same
+  // batch (all requests are on the wire before any acknowledgement can fail); then keep
+  // draining children announced while a round was in flight, until a round finds none.
+  let sent = 0;
+  const nextChildren = (): string[] => {
+    const fresh = [...children].slice(sent);
+    sent += fresh.length;
+    return fresh;
   };
-  await interruptNewChildren();
-  await interrupt([ours.turnId]);
-  await interruptNewChildren();
+  await interrupt([...nextChildren(), ours.turnId]);
+  for (let fresh = nextChildren(); fresh.length > 0; fresh = nextChildren()) {
+    await interrupt(fresh);
+  }
 }
 
 run()
