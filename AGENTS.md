@@ -32,6 +32,8 @@ script に出し、判断だけを skill に残す (`wiki/architecture/delegatio
   `NodeJS.Timeout` でなく `ReturnType<typeof setTimeout>`。
 - tsconfig.json は tsc 専用、deno.jsonc は deno の check/fmt/lint 用 (lib が非互換なため分離。
   両ファイルのコメント参照)。
+- シンボルの参照検索・改名・削除・推論型の確認は `skills/lsmcp/SKILL.md` (vendor の lsmcp、
+  `.mcp.json` で登録) を使い、grep とテキスト置換でやらない。
 
 ## 依存
 

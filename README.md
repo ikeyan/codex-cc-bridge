@@ -37,6 +37,7 @@ Claude Code のネイティブ機能 (Background Task・完了通知・Monitor�
   ポート抽出と readyz 待ち) と、rollout からの `turn_context` 取り出し。
 - `commands/codex-task.md`, `commands/codex-review.md` — slash commands。
 - `skills/codex-bridge/SKILL.md` — 起動レシピ・turn 入力の組み方・セキュリティ不変条件。
+- `skills/lsmcp/SKILL.md` — 開発時の意味的なコード操作 (vendor/lsmcp、`.mcp.json` で登録)。
 - `wiki/` — コードより上位の説明 (アーキテクチャ・ドメイン・セキュリティ)。plasma-wiki 管理。
 - `tests/codex-turn.test.mjs` — 不変条件を pin。検証一式は `npm test`
   (driver を node/deno/bun で回すテスト行列 + `deno check` + `tsc` + `deno fmt/lint`
