@@ -4,7 +4,7 @@ desc: この橋がなぜ driver 1 本しか持たないのか — CC と codex �
 tags: []
 sources: []
 created: 2026-09-06T07:16:13Z
-updated: 2026-09-06T07:16:13Z
+updated: 2026-09-14T14:11:59Z
 ---
 
 # architecture
@@ -15,7 +15,7 @@ updated: 2026-09-06T07:16:13Z
 
 [[architecture/resident-app-server|resident-app-server]]: 1 セッション 1 app-server を Claude sandbox 内に常駐させ loopback WebSocket で駆動する構成の理由 — unix socket が bind できないこと、起動場所が封じ込めを決めること、ポートがセッションの識別子になること.
 
-[[architecture/turn-event-demultiplexing|turn-event-demultiplexing]]: 共有 app-server から流れる全通知の中から自分の turn だけを拾う 3 段フィルタと、turn id 確定前のイベントを取りこぼさないバッファ、制御 RPC だけにタイムアウトを置く非対称の理由.
+[[architecture/turn-event-demultiplexing|turn-event-demultiplexing]]: 共有 app-server から流れる全通知の中から自分の turn だけを拾う 2 段フィルタ (turn 確定前は無条件バッファ)、イベント列の文法と各値の確定条件、制御 RPC だけにタイムアウトを置く非対称の理由.
 
 ***
 

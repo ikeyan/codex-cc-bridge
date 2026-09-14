@@ -1,7 +1,7 @@
 ---
 name: architecture/turn-event-demultiplexing
 title: 自 turn の同定とイベントの多重化
-desc: 共有 app-server から流れる全通知の中から自分の turn だけを拾う 3 段フィルタと、turn id 確定前のイベントを取りこぼさないバッファ、制御 RPC だけにタイムアウトを置く非対称の理由.
+desc: 共有 app-server から流れる全通知の中から自分の turn だけを拾う 2 段フィルタ (turn 確定前は無条件バッファ)、イベント列の文法と各値の確定条件、制御 RPC だけにタイムアウトを置く非対称の理由.
 tags: []
 sources: []
 created: 2026-09-06T07:10:31Z

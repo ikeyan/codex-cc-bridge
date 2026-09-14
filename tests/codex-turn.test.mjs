@@ -788,6 +788,50 @@ test("connection dropping while the interrupt is pending is reported, with the a
   assert.ok(Date.now() - t0 < 1500, "must not wait for the interrupt timeout");
 });
 
+test("a child announced while our interrupt is in flight is interrupted too", async () => {
+  const recorded = [];
+  let child;
+  const server = await startMockServer((msg, send) => {
+    if (msg.method) recorded.push(msg);
+    if (msg.id === undefined) return;
+    if (msg.method === "turn/interrupt") {
+      // While acknowledging the parent's interrupt, the server announces another subagent.
+      if (msg.params.turnId === "turn-1") {
+        send({
+          jsonrpc: "2.0",
+          method: "turn/started",
+          params: {
+            threadId: "thread-1",
+            turn: { id: "late-child", status: "inProgress", items: [] },
+          },
+        });
+      }
+      send({ jsonrpc: "2.0", id: msg.id, result: {} });
+      return;
+    }
+    appServerBehaviour(recorded, {
+      onTurnStart: () => setTimeout(() => child.kill("SIGTERM"), 100),
+    })(msg, send);
+  });
+  const result = new Promise((resolve) => {
+    child = spawnDriver(["--session", makeSession(server.port), "--cwd", "/tmp"], {});
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d));
+    child.on("close", (code) => resolve({ code, stderr }));
+    child.stdin.write("x");
+    child.stdin.end();
+  });
+  const t0 = Date.now();
+  const r = await result;
+  server.close();
+  assert.equal(r.code, 130, r.stderr);
+  assert.deepEqual(
+    recorded.filter((m) => m.method === "turn/interrupt").map((m) => m.params.turnId),
+    ["turn-1", "late-child"],
+  );
+  assert.ok(Date.now() - t0 < 1500, "no waiting beyond the acknowledgements");
+});
+
 test("every announced subagent turn of a plain turn is interrupted, then ours", async () => {
   const recorded = [];
   let child;

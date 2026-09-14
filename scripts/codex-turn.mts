@@ -864,16 +864,30 @@ async function interruptOwned(): Promise<void> {
       sleep(3000, undefined, { ref: false }),
     ]);
   }
-  const targets = [...children, ours.turnId];
-  await withTimeout(
-    Promise.all(
-      targets.map((turnId) =>
-        request("turn/interrupt", { threadId: ours.threadId, turnId }, isUnknown)
+  const interrupt = (turnIds: string[]): Promise<unknown> =>
+    withTimeout(
+      Promise.all(
+        turnIds.map((turnId) =>
+          request("turn/interrupt", { threadId: ours.threadId, turnId }, isUnknown)
+        ),
       ),
-    ),
-    3000,
-    "turn/interrupt",
-  );
+      3000,
+      "turn/interrupt",
+    );
+  // Children keep announcing themselves while interrupts are in flight (the server does
+  // not stop on our account), so drain `children` until a round finds nothing new.
+  const interrupted = new Set<string>();
+  const interruptNewChildren = async (): Promise<void> => {
+    for (;;) {
+      const fresh = [...children].filter((id) => !interrupted.has(id));
+      if (fresh.length === 0) return;
+      for (const id of fresh) interrupted.add(id);
+      await interrupt(fresh);
+    }
+  };
+  await interruptNewChildren();
+  await interrupt([ours.turnId]);
+  await interruptNewChildren();
 }
 
 run()
