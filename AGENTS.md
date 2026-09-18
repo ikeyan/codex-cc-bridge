@@ -11,7 +11,7 @@
   (erasable types のみ、Node >= 23.6 の type stripping で直接実行) で書く。依存ゼロを維持。
 - 検証は 1 コマンド: `npm test` (= `node scripts/check.mts`)。driver を node/deno/bun で回す
   テスト行列 + `deno check` + `tsc` (strict, `erasableSyntaxOnly`) + `deno fmt --check` +
-  `deno lint` + `wiki update --check`/`wiki lint` + REVIEW.md の上流同期チェック。
+  `deno lint` + `wiki update --check`/`wiki lint`。
   tsc には devDependencies が必要 (`npm install`。lockfile は package-lock.json)、
   wiki 系には uv が必要 (plasma-wiki は pyproject.toml + uv.lock で固定)。個別実行:
   `node --test tests/codex-turn.test.mjs` / `deno check scripts/*.mts` / `node_modules/.bin/tsc -p .`。
@@ -22,7 +22,6 @@
   `min-release-age` (公開 3 日未満を掴まない) と `strict-allow-scripts` (package.json の
   `allowScripts` に無い依存の install script はエラー) を効かせている。現在 install script を
   持つ依存はゼロなので `allowScripts` は空のまま維持する。
-- REVIEW.md は `ikeyan/agent-files` のコピー。直接編集せず上流を直す (frontmatter の `source:`)。
 - `wiki/` は plasma-wiki 管理。index と相互リンクは `wiki update` が生成するので手で書かない。
   ページ追加は `wiki new`、検査は `wiki lint` (どちらも `npm test` に入っている)。desc は句点でなく
   `.` で終える (lint 規約)。wiki にはコードを読めば分かることを書かず、外部依存の実測は canon に置く。

@@ -38,5 +38,4 @@ Claude Code のネイティブ機能 (Background Task・完了通知・Monitor�
 - `skills/codex-bridge/SKILL.md` — 起動レシピ・turn 入力の組み方・セキュリティ不変条件。
 - `wiki/` — コードより上位の説明 (アーキテクチャ・ドメイン・セキュリティ)。plasma-wiki 管理。
 - `tests/codex-turn.test.mjs` — 不変条件を pin。検証一式は `npm test`
-  (driver を node/deno/bun で回すテスト行列 + `deno check` + `tsc` + `deno fmt/lint`
-  + REVIEW.md の上流同期チェック)。
+  (driver を node/deno/bun で回すテスト行列 + `deno check` + `tsc` + `deno fmt/lint`)。
